@@ -1,0 +1,17 @@
+1. The player can move in the four orthogonal directions (up, down,
+left, and right).
+2. The player can only stand on empty spaces or target spaces. The
+player cannot walk through walls.
+3. The player can push a crate, only if there is an empty space behind
+it. The player cannot push multiple crates at once.
+4. The player cannot pull crates.
+5. The goal of each level is to put all crates on the target spaces.
+
+
+// implement iterative deepening A* search w/ heuristics and deadlock pruning
+f(n) = g(n) + h(n)
+
+f(n)  = Total cost evaluation function.
+g(n) = The actual cost from the initial node to the current node.
+h(n) = Heuristic estimated cost from the current node to the goal state. it is based on the approximation according to the problem characteristics.
+
