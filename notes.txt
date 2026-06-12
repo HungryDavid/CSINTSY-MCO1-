@@ -9,6 +9,7 @@ it. The player cannot push multiple crates at once.
 
 
 // implement iterative deepening A* search w/ heuristics and deadlock pruning
+// implement greedy search for optimal box to target matching
 f(n) = g(n) + h(n)
 
 f(n)  = Total cost evaluation function.
