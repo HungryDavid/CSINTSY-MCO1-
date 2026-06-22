@@ -178,31 +178,39 @@ public class SokoBot {
 
                             if (mapData[pushR][pushC] != '#' && !deadlockGrid[pushR][pushC] && Arrays.binarySearch(current.boxPositions, pushId) < 0) {
                                 
-                              // Valid Push! Generate the move
-                              String walkPath = reconstructPath(posId, current.actualPlayerPos, parent, moveLog);
-                              char pushMoveChar = (char) dir[2];
+                                // Valid Push! Generate the move
+                                String walkPath = reconstructPath(posId, current.actualPlayerPos, parent, moveLog);
+                                char pushMoveChar = (char) dir[2];
 
-                              int[] newBoxes = current.boxPositions.clone();
-                              int bIdx = Arrays.binarySearch(newBoxes, boxId);
-                              newBoxes[bIdx] = pushId;
-                              Arrays.sort(newBoxes);
+                                // ... (inside Phase 2's valid push check) ...
 
-                              // ==========================================
-                              // PLACE THE DEADLOCK CHECK RIGHT HERE
-                              // (Notice we pass 'newBoxes' to check the future state)
-                              // ==========================================
-                              if (isDynamicDeadlock(pushR, pushC, newBoxes, targets, mapData, width, height)) {
-                                  continue; // Prune this branch, we formed an unmovable block!
-                              }
+                                int[] newBoxes = current.boxPositions.clone();
+                                int bIdx = Arrays.binarySearch(newBoxes, boxId);
+                                newBoxes[bIdx] = pushId;
+                                Arrays.sort(newBoxes);
 
-                              // Calculate the actual length of the walk
-                              int walkCost = walkPath.length();
-                              int newH = calculateGreedyHeuristic(newBoxes, targets, width, exactDistances);
+                                // ==========================================
+                                // THE DEADLOCK SECURITY CHECKPOINT
+                                // ==========================================
+                                if (isDynamicDeadlock(pushR, pushC, newBoxes, targets, mapData, width, height)) {
+                                    continue; // Prune 2x2 blocks
+                                }
+                                if (isFrozenDeadlock(newBoxes, targets, mapData, width, height)) {
+                                    continue; // Prune Wall-Clamps (Pic 1)
+                                }
+                                if (isDoorwayTrap(newBoxes, targets, mapData, width, height)) {
+                                    continue; // Prune Sealed Rooms (Pic 2)
+                                }
 
-                              // Add the walkCost to the gCost to penalize wandering aimlessly
-                              State nextState = new State(boxId, newBoxes, current.gCost + walkCost + 1, newH, current.path + walkPath + pushMoveChar);
+                                // Calculate the actual length of the walk...
+                                // Calculate the actual length of the walk
+                                int walkCost = walkPath.length();
+                                int newH = calculateGreedyHeuristic(newBoxes, targets, width, exactDistances);
 
-                              openList.add(nextState);
+                                // Add the walkCost to the gCost to penalize wandering aimlessly
+                                State nextState = new State(boxId, newBoxes, current.gCost + walkCost + 1, newH, current.path + walkPath + pushMoveChar);
+
+                                openList.add(nextState);
                             }
                         }
                     }
@@ -363,6 +371,116 @@ public class SokoBot {
           if (solids == 4 && hasBoxOffTarget) return true; 
       }
       return false;
+    }
+
+    // Detects Pic 1: Boxes sliding along a wall and freezing against each other
+    private boolean isFrozenDeadlock(int[] boxes, int[] targets, char[][] mapData, int width, int height) {
+        for (int b : boxes) {
+            // If the box is already safely parked on a target, it's allowed to be clamped
+            if (Arrays.binarySearch(targets, b) >= 0) continue; 
+            
+            int r = b / width;
+            int c = b % width;
+            
+            boolean wallUp = mapData[r-1][c] == '#';
+            boolean wallDown = mapData[r+1][c] == '#';
+            boolean wallLeft = mapData[r][c-1] == '#';
+            boolean wallRight = mapData[r][c+1] == '#';
+            
+            boolean boxUp = Arrays.binarySearch(boxes, (r-1)*width + c) >= 0;
+            boolean boxDown = Arrays.binarySearch(boxes, (r+1)*width + c) >= 0;
+            boolean boxLeft = Arrays.binarySearch(boxes, r*width + c - 1) >= 0;
+            boolean boxRight = Arrays.binarySearch(boxes, r*width + c + 1) >= 0;
+            
+            // If pushed against a wall, and blocked by a box that is ALSO against that wall = Permanent Freeze
+            if (wallLeft) {
+                if (boxUp && mapData[r-1][c-1] == '#') return true; 
+                if (boxDown && mapData[r+1][c-1] == '#') return true; 
+            }
+            if (wallRight) {
+                if (boxUp && mapData[r-1][c+1] == '#') return true;
+                if (boxDown && mapData[r+1][c+1] == '#') return true;
+            }
+            if (wallUp) {
+                if (boxLeft && mapData[r-1][c-1] == '#') return true;
+                if (boxRight && mapData[r-1][c+1] == '#') return true;
+            }
+            if (wallDown) {
+                if (boxLeft && mapData[r+1][c-1] == '#') return true;
+                if (boxRight && mapData[r+1][c+1] == '#') return true;
+            }
+        }
+        return false;
+    }
+
+    // Detects Pic 2: Boxes pushed onto chokepoints, sealing the room off
+    private boolean isDoorwayTrap(int[] currentBoxes, int[] targets, char[][] mapData, int width, int height) {
+        List<Integer> emptyTargets = new ArrayList<>();
+        List<Integer> unplacedBoxes = new ArrayList<>();
+        Set<Integer> placedBoxes = new HashSet<>();
+
+        // Categorize boxes: Parked vs. Mobile
+        for (int b : currentBoxes) {
+            if (Arrays.binarySearch(targets, b) >= 0) {
+                placedBoxes.add(b);
+            } else {
+                unplacedBoxes.add(b);
+            }
+        }
+        
+        for (int t : targets) {
+            if (!placedBoxes.contains(t)) {
+                emptyTargets.add(t);
+            }
+        }
+
+        if (unplacedBoxes.isEmpty() || emptyTargets.isEmpty()) return false;
+
+        boolean[] visited = new boolean[width * height];
+        Queue<Integer> q = new ArrayDeque<>();
+        
+        // Start a flood fill from ALL empty targets simultaneously
+        for (int t : emptyTargets) {
+            q.add(t);
+            visited[t] = true;
+        }
+
+        int[][] dirs = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+        int reachableUnplacedBoxes = 0;
+
+        while (!q.isEmpty()) {
+            int curr = q.poll();
+            
+            if (unplacedBoxes.contains(curr)) {
+                reachableUnplacedBoxes++;
+            }
+
+            int r = curr / width;
+            int c = curr % width;
+
+            for (int[] d : dirs) {
+                int nr = r + d[0];
+                int nc = c + d[1];
+                if (nr >= 0 && nr < height && nc >= 0 && nc < width) {
+                    int nId = nr * width + nc;
+                    
+                    // 1. If it's a structural brick wall, stop
+                    if (mapData[nr][nc] == '#') continue; 
+                    
+                    // 2. If it's a PLACED box (parked on a target), treat it as a wall, stop
+                    if (placedBoxes.contains(nId)) continue;
+                    
+                    // 3. UNPLACED boxes are treated as floor because they can still be pushed
+                    if (!visited[nId]) {
+                        visited[nId] = true;
+                        q.add(nId);
+                    }
+                }
+            }
+        }
+        
+        // If the empty targets cannot reach ALL unplaced boxes because parked boxes blocked the way, it's a trap!
+        return reachableUnplacedBoxes < unplacedBoxes.size();
     }
 
     private int[][] precomputeExactDistances(int[] targets, int width, int height, char[][] mapData) {
