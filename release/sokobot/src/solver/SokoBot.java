@@ -3,242 +3,375 @@ package solver;
 import java.util.*;
 
 public class SokoBot {
-  
-    static class State implements Comparable<State> {
-      int playerRow, playerCol; // player location
-      int[] boxPositions; // Swapped HashSet for a primitive sorted array to eliminate memory allocation overhead
-      int gCost; 
-      int hCost; 
-      String path; 
 
-      public State(int pRow, int pCol, int[] boxes, int gCost, int hCost, String path) {
-        this.playerRow = pRow;
-        this.playerCol = pCol;
-        this.boxPositions = boxes;
-        this.gCost = gCost;
-        this.hCost = hCost;
-        this.path = path;
-      }
+    private int width, height, totalCells;
+    private boolean[] isWall, isTarget, deadSquare;
+    private int[] targetList;
+    private int numBoxes;
+    private int[][] distToTarget; // [targetIdx][cellPos]
+    private long[] zobristBox, zobristPlayer;
 
-      public int getFCost() {
-        return gCost + hCost;
-      }
-
-      @Override 
-      public int compareTo(State other) { // returns the lowest fcost
-        return Integer.compare(this.getFCost(), other.getFCost());
-      }
- 
-      @Override // checks if state is identical/visited before
-      public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof State)) return false;
-        State state = (State) o;
-        return playerRow == state.playerRow && 
-               playerCol == state.playerCol && 
-               Arrays.equals(this.boxPositions, state.boxPositions); 
-      }
-
-      @Override
-      public int hashCode() { // checks if the states are the same
-        // Fast hashing function for primitive arrays
-        int result = Objects.hash(playerRow, playerCol);
-        return 31 * result + Arrays.hashCode(boxPositions);
-      }
-    }
+    private static final int[] DR = {-1, 1, 0, 0};
+    private static final int[] DC = {0, 0, -1, 1};
+    private static final char[] MC = {'u', 'd', 'l', 'r'};
 
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
-      List<Integer> targetList = new ArrayList<>();
-      List<Integer> startBoxList = new ArrayList<>();
-      int startPRow = -1, startPCol = -1;
-      // uses A* search
-      // scans the map for the target/boxes and player
-      for (int r = 0; r < height; r++) {
-          for (int c = 0; c < width; c++) {
-              int posId = r * width + c; 
-              if (mapData[r][c] == '.') targetList.add(posId);
-              if (itemsData[r][c] == '@') {
-                  startPRow = r;
-                  startPCol = c;
-              } else if (itemsData[r][c] == '$') {
-                  startBoxList.add(posId);
-              }
-          }
-      }
+        this.width = width;
+        this.height = height;
+        this.totalCells = width * height;
 
-      int[] targets = targetList.stream().mapToInt(i -> i).toArray();
-      int[] startBoxes = startBoxList.stream().mapToInt(i -> i).toArray();
-      Arrays.sort(startBoxes);
-      
-      // computes the deadlocks of the boxes
-      boolean[][] deadlockGrid = precomputeDeadlocks(width, height, mapData, targetList);
-      
-      // checks every possible state/path
-      PriorityQueue<State> openList = new PriorityQueue<>();
-      Set<State> visited = new HashSet<>();
-      
-      // uses greedy search to calculate box to target matching
-      int initialH = calculateGreedyHeuristic(startBoxes, targets, width);
-      State startState = new State(startPRow, startPCol, startBoxes, 0, initialH, "");
-      openList.add(startState);
+        isWall = new boolean[totalCells];
+        isTarget = new boolean[totalCells];
+        List<Integer> tList = new ArrayList<>(), bList = new ArrayList<>();
+        int playerPos = -1;
 
-      while (!openList.isEmpty()) {
-        State current = openList.poll();
-        
-        if (Arrays.equals(current.boxPositions, targets)) {
-          return current.path; 
-        }
-
-        if (visited.contains(current)) continue;
-        visited.add(current);
-
-        int[][] directions = {{-1, 0, 'u'}, {1, 0, 'd'}, {0, -1, 'l'}, {0, 1, 'r'}};
-
-        for (int[] dir : directions) {
-          int nextPRow = current.playerRow + dir[0];
-          int nextPCol = current.playerCol + dir[1];
-          char moveChar = (char) dir[2];
-
-          if (nextPRow < 0 || nextPRow >= height || nextPCol < 0 || nextPCol >= width) continue;
-          if (mapData[nextPRow][nextPCol] == '#') continue;
-
-          int nextPosId = nextPRow * width + nextPCol;
-          
-          // simulates pushing the boxes
-          int boxIdx = Arrays.binarySearch(current.boxPositions, nextPosId);
-          boolean isBox = boxIdx >= 0;
-
-          int[] newBoxes = current.boxPositions;
-
-          if (isBox) {
-            int nextBRow = nextPRow + dir[0];
-            int nextBCol = nextPCol + dir[1];
-            int newBoxPosId = nextBRow * width + nextBCol;
-
-            if (nextBRow < 0 || nextBRow >= height || nextBCol < 0 || nextBCol >= width) continue;
-            if (mapData[nextBRow][nextBCol] == '#') continue;
-            if (Arrays.binarySearch(current.boxPositions, newBoxPosId) >= 0) continue;
-            if (deadlockGrid[nextBRow][nextBCol]) continue;
-
-            // Instantly clone and update the array inline
-            newBoxes = current.boxPositions.clone();
-            newBoxes[boxIdx] = newBoxPosId;
-            Arrays.sort(newBoxes);
-          }
-          
-          int nextH = calculateGreedyHeuristic(newBoxes, targets, width);
-          State neighbor = new State(nextPRow, nextPCol, newBoxes, current.gCost + 1, nextH, current.path + moveChar);
-          
-          if (!visited.contains(neighbor)) {
-            openList.add(neighbor);
-          }
-        }
-      }
-      return ""; 
-    }
-
-    // assigns targets dynamically using greedy match elimination
-    public int calculateGreedyHeuristic(int[] boxPositions, int[] targets, int width) {
-      int totalDistance = 0;
-      boolean[] targetMatched = new boolean[targets.length];
-
-      for (int box : boxPositions) {
-          int br = box / width;
-          int bc = box % width;
-          
-          int minBoxDist = Integer.MAX_VALUE; 
-          int bestTargetIdx = -1;
-
-          for (int i = 0; i < targets.length; i++) {
-              if (targetMatched[i]) continue; // Skip already assigned targets
-              
-              int tr = targets[i] / width;
-              int tc = targets[i] % width;
-              
-              int dist = Math.abs(br - tr) + Math.abs(bc - tc);
-              if (dist < minBoxDist) {
-                  minBoxDist = dist;
-                  bestTargetIdx = i;
-              }
-          }
-          
-          if (bestTargetIdx != -1) {
-              targetMatched[bestTargetIdx] = true;
-              totalDistance += minBoxDist;
-          }
-      }
-      return totalDistance;
-    }
-
-    private boolean[][] precomputeDeadlocks(int width, int height, char[][] mapData, List<Integer> targets) {
-        boolean[][] deadlocks = new boolean[height][width];
-        Set<Integer> targetSet = new HashSet<>(targets);
-        
-        for (int r = 1; r < height - 1; r++) {
-            for (int c = 1; c < width - 1; c++) {
-                if (mapData[r][c] == '#' || targetSet.contains(r * width + c)) continue;
-                
-                boolean wallUp = mapData[r - 1][c] == '#';
-                boolean wallDown = mapData[r + 1][c] == '#';
-                boolean wallLeft = mapData[r][c - 1] == '#';
-                boolean wallRight = mapData[r][c + 1] == '#';
-                
-                if ((wallUp && wallLeft) || (wallUp && wallRight) || (wallDown && wallLeft) || (wallDown && wallRight)) {
-                    deadlocks[r][c] = true;
-                }
+        for (int r = 0; r < height; r++)
+            for (int c = 0; c < width; c++) {
+                int p = r * width + c;
+                if (mapData[r][c] == '#') isWall[p] = true;
+                if (mapData[r][c] == '.') { isTarget[p] = true; tList.add(p); }
+                if (itemsData[r][c] == '@') playerPos = p;
+                else if (itemsData[r][c] == '$') bList.add(p);
             }
+
+        targetList = tList.stream().mapToInt(i -> i).toArray();
+        numBoxes = bList.size();
+
+        Random rng = new Random(42);
+        zobristBox = new long[totalCells];
+        zobristPlayer = new long[totalCells];
+        for (int i = 0; i < totalCells; i++) {
+            zobristBox[i] = rng.nextLong();
+            zobristPlayer[i] = rng.nextLong();
         }
-        
-        for (int r = 1; r < height - 1; r++) {
-            for (int c = 1; c < width - 1; c++) {
-                if (deadlocks[r][c]) {
-                    if (mapData[r - 1][c] == '#' || mapData[r + 1][c] == '#') {
-                        verifyAndMarkLine(r, c, 0, 1, width, mapData, targetSet, deadlocks);
-                    }
-                    if (mapData[r][c - 1] == '#' || mapData[r][c + 1] == '#') {
-                        verifyAndMarkLine(r, c, 1, 0, width, mapData, targetSet, deadlocks);
+
+        distToTarget = new int[targetList.length][totalCells];
+        for (int i = 0; i < targetList.length; i++) bfs(targetList[i], distToTarget[i]);
+
+        deadSquare = computeDeadSquares(mapData);
+
+        int[] initBoxes = bList.stream().mapToInt(i -> i).toArray();
+        Arrays.sort(initBoxes);
+        for (int b : initBoxes) if (deadSquare[b]) return "";
+
+        boolean[] iBits = new boolean[totalCells];
+        long iHash = 0;
+        for (int b : initBoxes) { iBits[b] = true; iHash ^= zobristBox[b]; }
+        int iNorm = norm(playerPos, iBits);
+        long iSH = iHash ^ zobristPlayer[iNorm];
+
+        int iH = heuristic(initBoxes);
+        if (iH >= 999999) return "";
+
+        // State storage
+        ArrayList<int[]> sBoxes = new ArrayList<>();
+        ArrayList<Integer> sPlayer = new ArrayList<>(), sParent = new ArrayList<>(),
+                           sDir = new ArrayList<>(), sPushFrom = new ArrayList<>();
+
+        sBoxes.add(initBoxes); sPlayer.add(playerPos);
+        sParent.add(-1); sDir.add(-1); sPushFrom.add(-1);
+
+        // Greedy Best-First: priority = h only
+        PriorityQueue<int[]> open = new PriorityQueue<>((a, b) ->
+            a[0] != b[0] ? a[0] - b[0] : b[1] - a[1]);
+        open.add(new int[]{iH, 0, 0});
+
+        HashMap<Long, Byte> visited = new HashMap<>();
+        visited.put(iSH, (byte) 1);
+
+        long startTime = System.currentTimeMillis();
+        int statesExplored = 0;
+        int minH = Integer.MAX_VALUE;
+
+        while (!open.isEmpty()) {
+            if (System.currentTimeMillis() - startTime > 14000) break;
+
+            int[] e = open.poll();
+            statesExplored++;
+            if (e[0] < minH) {
+                minH = e[0];
+                // System.out.println("New minH: " + minH + " at state " + statesExplored);
+            }
+            if (statesExplored % 20000 == 0) {
+                // System.out.println("Explored: " + statesExplored + ", open: " + open.size() + ", visited: " + visited.size() + ", minH: " + minH);
+            }
+            int sid = e[2];
+            int[] cb = sBoxes.get(sid);
+            int cp = sPlayer.get(sid);
+
+            // Goal?
+            boolean goal = true;
+            for (int b : cb) if (!isTarget[b]) { goal = false; break; }
+            if (goal) return buildPath(sid, sBoxes, sPlayer, sParent, sDir, sPushFrom);
+
+            boolean[] bits = new boolean[totalCells];
+            long bHash = 0;
+            for (int b : cb) { bits[b] = true; bHash ^= zobristBox[b]; }
+
+            // Player reachability
+            int[] rf = new int[totalCells];
+            Arrays.fill(rf, -1);
+            rf[cp] = cp;
+            int[] q = new int[totalCells];
+            int qh = 0, qt = 0;
+            q[qt++] = cp;
+            while (qh < qt) {
+                int pos = q[qh++];
+                int r = pos / width, c = pos % width;
+                for (int d = 0; d < 4; d++) {
+                    int nr = r + DR[d], nc = c + DC[d];
+                    if (nr >= 0 && nr < height && nc >= 0 && nc < width) {
+                        int np = nr * width + nc;
+                        if (rf[np] == -1 && !isWall[np] && !bits[np]) { rf[np] = pos; q[qt++] = np; }
                     }
                 }
             }
+
+            // Try pushes
+            int cg = e[1];
+            for (int bi = 0; bi < cb.length; bi++) {
+                int bp = cb[bi], br = bp / width, bc = bp % width;
+                for (int d = 0; d < 4; d++) {
+                    int pr = br - DR[d], pc = bc - DC[d];
+                    if (pr < 0 || pr >= height || pc < 0 || pc >= width) continue;
+                    int pn = pr * width + pc;
+                    if (rf[pn] == -1) continue;
+
+                    int nr = br + DR[d], nc = bc + DC[d];
+                    if (nr < 0 || nr >= height || nc < 0 || nc >= width) continue;
+                    int nbp = nr * width + nc;
+                    if (isWall[nbp] || bits[nbp]) continue;
+                    if (deadSquare[nbp]) continue;
+
+                    int[] nb = cb.clone();
+                    nb[bi] = nbp;
+                    Arrays.sort(nb);
+
+                    boolean[] nBits = new boolean[totalCells];
+                    for (int b : nb) nBits[b] = true;
+                    if (is2x2Dead(nBits, nbp)) continue;
+                    if (isFrozen(nb, nBits, nbp)) continue;
+
+                    int npl = bp;
+                    int nn = norm(npl, nBits);
+                    long nBH = bHash ^ zobristBox[bp] ^ zobristBox[nbp];
+                    long nSH = nBH ^ zobristPlayer[nn];
+
+                    if (visited.containsKey(nSH)) continue;
+                    visited.put(nSH, (byte) 1);
+
+                    int h = heuristic(nb);
+                    if (h >= 999999) continue;
+
+                    int nsid = sBoxes.size();
+                    sBoxes.add(nb); sPlayer.add(npl);
+                    sParent.add(sid); sDir.add(d); sPushFrom.add(pn);
+
+                    open.add(new int[]{h, cg + 1, nsid});
+                }
+            }
         }
-        return deadlocks;
+        return "";
     }
 
-    private void verifyAndMarkLine(int startR, int startC, int dRow, int dCol, int width, char[][] mapData, Set<Integer> targets, boolean[][] deadlocks) {
-        int height = mapData.length;
-        int mapWidth = mapData[0].length;
-        
-        int r = startR + dRow;
-        int c = startC + dCol;
-        List<int[]> pathCells = new ArrayList<>();
-        
-        while (r >= 0 && r < height && c >= 0 && c < mapWidth && mapData[r][c] != '#') {
-            if (targets.contains(r * width + c)) return;
-            
-            boolean hasWallSide1 = false;
-            boolean hasWallSide2 = false;
-            
-            int side1R = r - dCol; int side1C = c - dRow;
-            if (side1R >= 0 && side1R < height && side1C >= 0 && side1C < mapWidth) {
-                hasWallSide1 = mapData[side1R][side1C] == '#';
+    /** Greedy bipartite matching heuristic: O(n^2). Faster than Hungarian. */
+    private int heuristic(int[] boxes) {
+        int n = boxes.length;
+        if (n == 0) return 0;
+
+        // Build cost matrix
+        int[][] c = new int[n][n];
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++) {
+                c[i][j] = distToTarget[j][boxes[i]];
+                if (c[i][j] >= 999999) return 999999;
             }
-            int side2R = r + dCol; int side2C = c + dRow;
-            if (side2R >= 0 && side2R < height && side2C >= 0 && side2C < mapWidth) {
-                hasWallSide2 = mapData[side2R][side2C] == '#';
-            }
-            
-            if (!hasWallSide1 && !hasWallSide2) return;
-            
-            if (deadlocks[r][c]) {
-                for (int[] cell : pathCells) {
-                    deadlocks[cell[0]][cell[1]] = true;
+
+        // Greedy assignment: repeatedly pick the globally cheapest (box,target) pair
+        boolean[] bUsed = new boolean[n], tUsed = new boolean[n];
+        int total = 0;
+        for (int step = 0; step < n; step++) {
+            int best = Integer.MAX_VALUE, bi2 = -1, ti2 = -1;
+            for (int i = 0; i < n; i++) {
+                if (bUsed[i]) continue;
+                for (int j = 0; j < n; j++) {
+                    if (tUsed[j]) continue;
+                    if (c[i][j] < best) { best = c[i][j]; bi2 = i; ti2 = j; }
                 }
-                return;
             }
-            
-            pathCells.add(new int[]{r, c});
-            r += dRow;
-            c += dCol;
+            if (bi2 == -1) return 999999;
+            bUsed[bi2] = true; tUsed[ti2] = true;
+            total += best;
         }
+        return total;
+    }
+
+    /** Check if newly pushed box creates a frozen deadlock (box can't move). */
+    private boolean isFrozen(int[] boxes, boolean[] boxBits, int pos) {
+        if (isTarget[pos]) return false;
+        return frozenCheck(pos, boxBits, new boolean[totalCells]);
+    }
+
+    private boolean frozenCheck(int pos, boolean[] boxBits, boolean[] vis) {
+        if (isTarget[pos]) return false;
+        vis[pos] = true;
+        int r = pos / width, c = pos % width;
+
+        // Check vertical lock
+        boolean vLocked;
+        int up = (r - 1) * width + c, down = (r + 1) * width + c;
+        boolean upWall = r == 0 || isWall[up];
+        boolean downWall = r == height - 1 || isWall[down];
+        if (upWall || downWall) {
+            vLocked = true;
+        } else {
+            boolean upBox = boxBits[up] && !vis[up] && frozenCheck(up, boxBits, vis);
+            boolean downBox = boxBits[down] && !vis[down] && frozenCheck(down, boxBits, vis);
+            vLocked = upBox || downBox;
+        }
+        if (!vLocked) return false;
+
+        // Check horizontal lock
+        int left = r * width + c - 1, right = r * width + c + 1;
+        boolean leftWall = c == 0 || isWall[left];
+        boolean rightWall = c == width - 1 || isWall[right];
+        if (leftWall || rightWall) return true;
+        boolean leftBox = boxBits[left] && !vis[left] && frozenCheck(left, boxBits, vis);
+        boolean rightBox = boxBits[right] && !vis[right] && frozenCheck(right, boxBits, vis);
+        return leftBox || rightBox;
+    }
+
+    private String buildPath(int sid, ArrayList<int[]> sb, ArrayList<Integer> sp,
+                             ArrayList<Integer> spar, ArrayList<Integer> sd, ArrayList<Integer> spf) {
+        List<int[]> seq = new ArrayList<>();
+        int cur = sid;
+        while (spar.get(cur) != -1) {
+            seq.add(new int[]{spar.get(cur), sd.get(cur), spf.get(cur)});
+            cur = spar.get(cur);
+        }
+        Collections.reverse(seq);
+
+        StringBuilder res = new StringBuilder();
+        for (int[] push : seq) {
+            int pSid = push[0], dir = push[1], pNeeded = push[2];
+            int[] pBoxes = sb.get(pSid);
+            int pPlayer = sp.get(pSid);
+
+            boolean[] bb = new boolean[totalCells];
+            for (int b : pBoxes) bb[b] = true;
+
+            int[] from = new int[totalCells];
+            int[] fd = new int[totalCells];
+            Arrays.fill(from, -1);
+            from[pPlayer] = pPlayer;
+            int[] q = new int[totalCells];
+            int qh2 = 0, qt2 = 0;
+            q[qt2++] = pPlayer;
+            while (qh2 < qt2) {
+                int pos = q[qh2++];
+                if (pos == pNeeded) break;
+                int r = pos / width, c = pos % width;
+                for (int d = 0; d < 4; d++) {
+                    int nr = r + DR[d], nc = c + DC[d];
+                    if (nr >= 0 && nr < height && nc >= 0 && nc < width) {
+                        int np = nr * width + nc;
+                        if (from[np] == -1 && !isWall[np] && !bb[np]) { from[np] = pos; fd[np] = d; q[qt2++] = np; }
+                    }
+                }
+            }
+
+            if (pNeeded != pPlayer) {
+                List<Character> wp = new ArrayList<>();
+                int c2 = pNeeded;
+                while (c2 != pPlayer) { wp.add(MC[fd[c2]]); c2 = from[c2]; }
+                Collections.reverse(wp);
+                for (char ch : wp) res.append(ch);
+            }
+            res.append(MC[dir]);
+        }
+        return res.toString();
+    }
+
+    private void bfs(int start, int[] dist) {
+        Arrays.fill(dist, 999999);
+        dist[start] = 0;
+        int[] q = new int[totalCells];
+        int qh = 0, qt = 0;
+        q[qt++] = start;
+        while (qh < qt) {
+            int pos = q[qh++];
+            int r = pos / width, c = pos % width;
+            for (int d = 0; d < 4; d++) {
+                int nr = r + DR[d], nc = c + DC[d];
+                if (nr >= 0 && nr < height && nc >= 0 && nc < width) {
+                    int np = nr * width + nc;
+                    if (!isWall[np] && dist[np] == 999999) { dist[np] = dist[pos] + 1; q[qt++] = np; }
+                }
+            }
+        }
+    }
+
+    private boolean[] computeDeadSquares(char[][] mapData) {
+        boolean[] reach = new boolean[totalCells];
+        for (int t : targetList) {
+            boolean[] vis = new boolean[totalCells];
+            int[] q = new int[totalCells];
+            int qh = 0, qt = 0;
+            q[qt++] = t; vis[t] = true;
+            while (qh < qt) {
+                int pos = q[qh++];
+                int r = pos / width, c = pos % width;
+                for (int d = 0; d < 4; d++) {
+                    int fr = r - DR[d], fc = c - DC[d];
+                    int plr = r - 2 * DR[d], plc = c - 2 * DC[d];
+                    if (fr >= 0 && fr < height && fc >= 0 && fc < width &&
+                        plr >= 0 && plr < height && plc >= 0 && plc < width) {
+                        int fp = fr * width + fc, pp = plr * width + plc;
+                        if (!isWall[fp] && !isWall[pp] && !vis[fp]) { vis[fp] = true; q[qt++] = fp; }
+                    }
+                }
+            }
+            for (int i = 0; i < totalCells; i++) if (vis[i]) reach[i] = true;
+        }
+        boolean[] dead = new boolean[totalCells];
+        for (int i = 0; i < totalCells; i++)
+            if (!isWall[i] && !isTarget[i] && !reach[i]) dead[i] = true;
+        return dead;
+    }
+
+    private boolean is2x2Dead(boolean[] bb, int pos) {
+        int r = pos / width, c = pos % width;
+        int[][] off = {{0,0},{0,-1},{-1,0},{-1,-1}};
+        for (int[] o : off) {
+            int tr = r + o[0], tc = c + o[1];
+            if (tr < 0 || tr + 1 >= height || tc < 0 || tc + 1 >= width) continue;
+            int p0 = tr*width+tc, p1 = tr*width+tc+1, p2 = (tr+1)*width+tc, p3 = (tr+1)*width+tc+1;
+            if ((isWall[p0]||bb[p0]) && (isWall[p1]||bb[p1]) && (isWall[p2]||bb[p2]) && (isWall[p3]||bb[p3])) {
+                if ((bb[p0]&&!isTarget[p0]) || (bb[p1]&&!isTarget[p1]) || (bb[p2]&&!isTarget[p2]) || (bb[p3]&&!isTarget[p3]))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private int norm(int pos, boolean[] bb) {
+        int min = pos;
+        boolean[] seen = new boolean[totalCells];
+        int[] q = new int[totalCells];
+        int qh = 0, qt = 0;
+        q[qt++] = pos; seen[pos] = true;
+        while (qh < qt) {
+            int p = q[qh++];
+            if (p < min) min = p;
+            int r = p / width, c = p % width;
+            for (int d = 0; d < 4; d++) {
+                int nr = r + DR[d], nc = c + DC[d];
+                if (nr >= 0 && nr < height && nc >= 0 && nc < width) {
+                    int np = nr * width + nc;
+                    if (!seen[np] && !isWall[np] && !bb[np]) { seen[np] = true; q[qt++] = np; }
+                }
+            }
+        }
+        return min;
     }
 }
