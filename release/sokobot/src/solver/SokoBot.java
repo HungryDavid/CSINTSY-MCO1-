@@ -269,8 +269,8 @@ public class SokoBot {
                 
                 if (!reachable[playerPushPos]) continue;
                 if (mapData[nr][nc] == '#' || hasBox[nextBoxPos]) continue;
-                if (staticDeadlockMap[nextBoxPos]) continue;
-                if (creates2x2Deadlock(nextBoxPos, boxes, boxPos, mapData, width, targets)) continue;
+                //if (staticDeadlockMap[nextBoxPos]) continue;
+                //if (creates2x2Deadlock(nextBoxPos, boxes, boxPos, mapData, width, targets)) continue;
                 
                 String walkPath = findWalkPath(state.actualPlayerPos, playerPushPos, boxes, mapData, width, height);
                 String fullMoveSequence = walkPath + pushChars[d];
