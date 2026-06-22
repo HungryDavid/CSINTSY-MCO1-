@@ -4,9 +4,16 @@ import java.util.*;
 
 public class SokoBot {
 
+    // 1. Declare class-level arrays outside methods (no size allocation yet)
+    private int[] globalReachable;
+    private int bfsToken = 0;
+
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
         long startTime = System.currentTimeMillis();
 
+        // 2. Allocate memory once right here at the start of the puzzle!
+        globalReachable = new int[width * height];
+        bfsToken = 0;
         // =========================================================
         // 1. ROBUST BOARD PARSING (Supports combined layers & symbols)
         // =========================================================
@@ -79,8 +86,14 @@ public class SokoBot {
         // =========================================================
         // 3. INITIAL STATE CREATION (Normalizing the starting point)
         // =========================================================
-        boolean[] initialReachable = getReachableTiles(startPlayerPos, startBoxes, mapData, width, height);
+        // Create your initial state safely
+        int[] initialReachable = getReachableTiles(startPlayerPos, startBoxes, mapData, width, height);
         int initialNormalizedPlayer = getNormalizedPlayerPos(initialReachable);
+        int initialHCost = getHeuristic(startBoxes, targets, exactDistances);
+        
+        // ADDED -1 HERE AS THE 6TH ARGUMENT!
+        State initialState = new State(startBoxes, startPlayerPos, initialNormalizedPlayer, 0, initialHCost, -1, "");
+        
 
         // =========================================================
         // 4. A* GRAPH SEARCH LOOP
@@ -98,8 +111,10 @@ public class SokoBot {
         });
 
         // Initialize the first state using the new constructor
-        int initialH = getHeuristic(startBoxes, targets, width);
-        State initialState = new State(startBoxes, startPlayerPos, initialNormalizedPlayer, 0, initialH, "");
+        
+
+
+        State initialState = new State(startBoxes, startPlayerPos, initialNormalizedPlayer, 0, initialHCost, -1, "");
 
         Set<State> closedSet = new HashSet<>();
         openSet.add(initialState);
@@ -116,7 +131,8 @@ public class SokoBot {
                 return curr.path;
             }
 
-            for (State nextState : getSuccessors(curr, mapData, staticDeadlockMap, width, height, targets)) {
+            // Change it to this:
+            for (State nextState : getSuccessors(curr, mapData, staticDeadlockMap, width, height, targets, exactDistances)) {
                 if (!closedSet.contains(nextState)) {
                     openSet.add(nextState);
                 }
@@ -184,67 +200,65 @@ public class SokoBot {
         }
     }
 
-    // Fixed: Pure 2D navigation eliminates 1D row wrap-around glitches
-    private boolean[] getReachableTiles(int playerPos, int[] boxPositions, char[][] mapData, int width, int height) {
-        boolean[] reachable = new boolean[width * height];
+    private int[] getReachableTiles(int playerPos, int[] boxPositions, char[][] mapData, int width, int height) {
+        bfsToken++; // Token increments to instantly "clear" the array without reallocating memory!
         
         boolean[] hasBox = new boolean[width * height];
-        for (int box : boxPositions) {
-            hasBox[box] = true;
-        }
+        for (int box : boxPositions) hasBox[box] = true;
 
-        Queue<Integer> queue = new LinkedList<>();
+        Queue<Integer> queue = new ArrayDeque<>(); 
         queue.add(playerPos);
-        reachable[playerPos] = true;
+        globalReachable[playerPos] = bfsToken;
 
-        int[] dr = {-1, 1, 0, 0};
-        int[] dc = {0, 0, -1, 1};
+        // Up, Down, Left, Right offsets
+        int[] dirs = {-width, width, -1, 1};
 
         while (!queue.isEmpty()) {
             int curr = queue.poll();
             int cr = curr / width;
             int cc = curr % width;
 
-            for (int i = 0; i < 4; i++) {
-                int nr = cr + dr[i];
-                int nc = cc + dc[i];
+            for (int dir : dirs) {
+                int next = curr + dir;
+                int nr = next / width;
+                int nc = next % width;
 
                 if (nr < 0 || nr >= height || nc < 0 || nc >= width) continue;
-                if (nc >= mapData[nr].length) continue;
+                if (mapData[nr].length <= nc) continue;
 
-                int next = nr * width + nc;
                 if (mapData[nr][nc] == '#' || hasBox[next]) continue;
 
-                if (!reachable[next]) {
-                    reachable[next] = true;
+                if (globalReachable[next] != bfsToken) {
+                    globalReachable[next] = bfsToken;
                     queue.add(next);
                 }
             }
         }
-        return reachable;
+        return globalReachable;
     }
 
-    private int getNormalizedPlayerPos(boolean[] reachableTiles) {
+    private int getNormalizedPlayerPos(int[] reachableTiles) {
         for (int i = 0; i < reachableTiles.length; i++) {
-            if (reachableTiles[i]) {
+            if (reachableTiles[i] == bfsToken) {
                 return i; 
             }
         }
         return -1;
     }
 
-    private List<State> getSuccessors(State state, char[][] mapData, boolean[] staticDeadlockMap, int width, int height, int[] targets) {
+    // Change it to this:
+    private List<State> getSuccessors(State state, char[][] mapData, boolean[] staticDeadlockMap, int width, int height, int[] targets, int[][] exactDistances) {
         List<State> successors = new ArrayList<>();
         int[] boxes = state.boxPositions;
         
-        boolean[] reachable = getReachableTiles(state.actualPlayerPos, boxes, mapData, width, height);
+        int[] reachable = getReachableTiles(state.actualPlayerPos, boxes, mapData, width, height);
         
         boolean[] hasBox = new boolean[width * height];
         for (int b : boxes) hasBox[b] = true;
         
         int[] rowDirs = {-1, 1, 0, 0};
         int[] colDirs = {0, 0, -1, 1};
-        char[] pushChars = {'u', 'd', 'l', 'r'}; 
+        char[] pushChars = {'u', 'd', 'l', 'r'}; // Or uppercase 'U','D','L','R' if your platform requires it
 
         for (int i = 0; i < boxes.length; i++) {
             int boxPos = boxes[i];
@@ -262,30 +276,43 @@ public class SokoBot {
                 
                 if (pr < 0 || pr >= height || pc < 0 || pc >= width) continue;
                 if (nr < 0 || nr >= height || nc < 0 || nc >= width) continue;
-                if (pc >= mapData[pr].length || nc >= mapData[nr].length) continue;
+                if (mapData[nr].length <= nc || mapData[pr].length <= pc) continue;
                 
                 int playerPushPos = pr * width + pc;
                 int nextBoxPos = nr * width + nc;
                 
-                if (!reachable[playerPushPos]) continue;
+                // Legality Checks
+                if (reachable[playerPushPos] != bfsToken) continue;
                 if (mapData[nr][nc] == '#' || hasBox[nextBoxPos]) continue;
-                //if (staticDeadlockMap[nextBoxPos]) continue;
-                //if (creates2x2Deadlock(nextBoxPos, boxes, boxPos, mapData, width, targets)) continue;
+                if (staticDeadlockMap[nextBoxPos]) continue;
+                if (creates2x2Deadlock(nextBoxPos, boxes, boxPos, mapData, width, targets)) continue;
                 
+                // Pathfinding & Setup
                 String walkPath = findWalkPath(state.actualPlayerPos, playerPushPos, boxes, mapData, width, height);
                 String fullMoveSequence = walkPath + pushChars[d];
                 
                 int[] nextBoxes = boxes.clone();
                 nextBoxes[i] = nextBoxPos;
+                Arrays.sort(nextBoxes);
                 
-                boolean[] nextReachable = getReachableTiles(boxPos, nextBoxes, mapData, width, height);
+                int nextActualPlayer = boxPos;
+                int[] nextReachable = getReachableTiles(nextActualPlayer, nextBoxes, mapData, width, height);
                 int nextNormalizedPlayer = getNormalizedPlayerPos(nextReachable);
+                int nextHCost = getHeuristic(nextBoxes, targets, exactDistances);
 
-                // REPLACE YOUR STATE CREATION AT THE BOTTOM WITH THIS:
-                int nextActualPlayer = boxPos; // The player steps into the tile the box just left
-                int nextHCost = getHeuristic(nextBoxes, targets, width);
-                
-                successors.add(new State(nextBoxes, nextActualPlayer, nextNormalizedPlayer, state.gCost + 1, nextHCost, state.path + fullMoveSequence));
+                // =========================================================
+                // THE FOCUS RULES (Safely inside the loop!)
+                // =========================================================
+                boolean wasOnTarget = Arrays.binarySearch(targets, boxPos) >= 0;
+                boolean willBeOnTarget = Arrays.binarySearch(targets, nextBoxPos) >= 0;
+                int targetLockPenalty = (wasOnTarget && !willBeOnTarget) ? 100 : 0;
+
+                int switchPenalty = (state.lastPushedBoxPos != -1 && state.lastPushedBoxPos != boxPos) ? 15 : 0;
+
+                int newGCost = state.gCost + 1 + walkPath.length() + targetLockPenalty + switchPenalty;
+
+                // Add the valid state to successors (Requires 7 arguments)
+                successors.add(new State(nextBoxes, nextActualPlayer, nextNormalizedPlayer, newGCost, nextHCost, nextBoxPos, state.path + fullMoveSequence));
             }
         }
         return successors;
@@ -348,25 +375,47 @@ public class SokoBot {
         return sb.reverse().toString();
     }
 
-    private int getHeuristic(int[] boxPositions, int[] targets, int width) {
-        int totalDist = 0;
-        for (int box : boxPositions) {
-            int br = box / width;
-            int bc = box % width;
-            int minDist = Integer.MAX_VALUE;
-            for (int target : targets) {
-                int tr = target / width;
-                int tc = target % width;
-                int dist = Math.abs(br - tr) + Math.abs(bc - tc);
-                if (dist < minDist) minDist = dist;
+    private int getHeuristic(int[] boxPositions, int[] targets, int[][] exactDistances) {
+        int totalDistance = 0;
+        long targetMatched = 0L; 
+        long boxMatched = 0L;    
+
+        for (int step = 0; step < boxPositions.length; step++) {
+            int globalMin = Integer.MAX_VALUE;
+            int bestB = -1;
+            int bestT = -1;
+
+            for (int b = 0; b < boxPositions.length; b++) {
+                if ((boxMatched & (1L << b)) != 0) continue; 
+                int boxPos = boxPositions[b];
+
+                for (int t = 0; t < targets.length; t++) {
+                    if ((targetMatched & (1L << t)) != 0) continue; 
+                    
+                    int dist = exactDistances[t][boxPos];
+                    if (dist < globalMin) {
+                        globalMin = dist;
+                        bestB = b;
+                        bestT = t;
+                    }
+                }
             }
-            if (minDist != Integer.MAX_VALUE) {
-                totalDist += minDist;
+
+            // If a box cannot reach ANY target, this state is impossible! Punish it heavily.
+            if (globalMin >= Integer.MAX_VALUE / 2) return Integer.MAX_VALUE / 2; 
+
+            if (bestB != -1 && bestT != -1) {
+                boxMatched |= (1L << bestB);
+                targetMatched |= (1L << bestT);
+                totalDistance += globalMin;
             }
         }
-        return totalDist;
+        return totalDistance;
     }
 
+    // =========================================================
+    // UPGRADED 2X2 DEADLOCK LOGIC
+    // =========================================================
     private boolean creates2x2Deadlock(int newBoxPos, int[] currentBoxes, int oldBoxPos, char[][] mapData, int width, int[] targets) {
         Set<Integer> boxes = new HashSet<>();
         for (int b : currentBoxes) {
@@ -383,9 +432,23 @@ public class SokoBot {
             int bc = c + offset[1];
             
             if (br >= 0 && bc >= 0) {
-                // Pass the targets array into the is2x2AllTargets method here
-                if (is2x2Filled(br, bc, boxes, mapData, width) && !is2x2AllTargets(br, bc, mapData, width, targets)) {
-                    return true;
+                if (is2x2Filled(br, bc, boxes, mapData, width)) {
+                    // It is ONLY a deadlock if we have a box in here that isn't on a target!
+                    if (hasBoxOffTarget(br, bc, boxes, width, targets)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean hasBoxOffTarget(int r, int c, Set<Integer> boxes, int width, int[] targets) {
+        for (int dr = 0; dr < 2; dr++) {
+            for (int dc = 0; dc < 2; dc++) {
+                int pos = (r + dr) * width + (c + dc);
+                if (boxes.contains(pos)) {
+                    if (Arrays.binarySearch(targets, pos) < 0) return true; 
                 }
             }
         }
@@ -427,5 +490,40 @@ public class SokoBot {
             }
         }
         return true;
+    }
+
+    // Calculates true walking distances from targets to every tile on the board, respecting walls.
+    private int[][] precomputeExactDistances(int[] targets, int width, int height, char[][] mapData) {
+        int[][] distMatrix = new int[targets.length][width * height];
+        for (int[] row : distMatrix) Arrays.fill(row, Integer.MAX_VALUE / 2);
+
+        int[][] dirs = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+
+        for (int i = 0; i < targets.length; i++) {
+            int targetId = targets[i];
+            Queue<Integer> q = new ArrayDeque<>();
+            q.add(targetId);
+            distMatrix[i][targetId] = 0;
+
+            while (!q.isEmpty()) {
+                int curr = q.poll();
+                int r = curr / width;
+                int c = curr % width;
+
+                for (int[] d : dirs) {
+                    int nr = r + d[0];
+                    int nc = c + d[1];
+
+                    if (nr >= 0 && nr < height && nc >= 0 && nc < width && mapData[nr][nc] != '#') {
+                        int nId = nr * width + nc;
+                        if (distMatrix[i][nId] > distMatrix[i][curr] + 1) {
+                            distMatrix[i][nId] = distMatrix[i][curr] + 1;
+                            q.add(nId);
+                        }
+                    }
+                }
+            }
+        }
+        return distMatrix;
     }
 }
