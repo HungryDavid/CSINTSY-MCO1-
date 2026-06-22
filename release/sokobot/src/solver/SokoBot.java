@@ -53,25 +53,25 @@ public class SokoBot {
         // =========================================================
         boolean[] staticDeadlockMap = new boolean[width * height];
 
-        // PASS 1: Find all the Corners
+        // PASS 1: Find all the Corners (Passed targets here)
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
                 int posId = r * width + c;
                 if (r < mapData.length && c < mapData[r].length && mapData[r][c] == '#') continue;
 
-                if (isDeadlock(posId, width, mapData)) {
+                if (isDeadlock(posId, width, mapData, targets)) {
                     staticDeadlockMap[posId] = true;
                 }
             }
         }
 
-        // PASS 2: Connect corners to find Dead Walls
+        // PASS 2: Connect corners to find Dead Walls (Passed targets here)
         for (int r = 1; r < height - 1; r++) {
             for (int c = 1; c < width - 1; c++) {
                 int posId = r * width + c;
                 if (staticDeadlockMap[posId]) {
-                    scanAndMarkDeadWall(r, c, 0, 1, staticDeadlockMap, mapData, width, height); // Scan Right
-                    scanAndMarkDeadWall(r, c, 1, 0, staticDeadlockMap, mapData, width, height); // Scan Down
+                    scanAndMarkDeadWall(r, c, 0, 1, staticDeadlockMap, mapData, width, height, targets); 
+                    scanAndMarkDeadWall(r, c, 1, 0, staticDeadlockMap, mapData, width, height, targets); 
                 }
             }
         }
@@ -81,7 +81,6 @@ public class SokoBot {
         // =========================================================
         boolean[] initialReachable = getReachableTiles(startPlayerPos, startBoxes, mapData, width, height);
         int initialNormalizedPlayer = getNormalizedPlayerPos(initialReachable);
-        State initialState = new State(startBoxes, initialNormalizedPlayer, 0, "");
 
         // =========================================================
         // 4. A* GRAPH SEARCH LOOP
@@ -89,11 +88,18 @@ public class SokoBot {
         PriorityQueue<State> openSet = new PriorityQueue<>(new Comparator<State>() {
             @Override
             public int compare(State s1, State s2) {
-                int f1 = s1.gCost + getHeuristic(s1.boxPositions, targets, width);
-                int f2 = s2.gCost + getHeuristic(s2.boxPositions, targets, width);
-                return Integer.compare(f1, f2);
+                int fCompare = Integer.compare(s1.fCost, s2.fCost);
+                if (fCompare == 0) {
+                    // Tie-breaker: If costs are equal, pick the one closer to the goal
+                    return Integer.compare(s1.hCost, s2.hCost);
+                }
+                return fCompare;
             }
         });
+
+        // Initialize the first state using the new constructor
+        int initialH = getHeuristic(startBoxes, targets, width);
+        State initialState = new State(startBoxes, startPlayerPos, initialNormalizedPlayer, 0, initialH, "");
 
         Set<State> closedSet = new HashSet<>();
         openSet.add(initialState);
@@ -109,7 +115,7 @@ public class SokoBot {
                 return curr.path; 
             }
 
-            for (State nextState : getSuccessors(curr, mapData, staticDeadlockMap, width, height)) {
+            for (State nextState : getSuccessors(curr, mapData, staticDeadlockMap, width, height, targets)) {
                 if (!closedSet.contains(nextState)) {
                     openSet.add(nextState);
                 }
@@ -119,55 +125,56 @@ public class SokoBot {
         return ""; 
     }
 
-    private boolean isDeadlock(int pos, int width, char[][] mapData) {
+    private boolean isDeadlock(int pos, int width, char[][] mapData, int[] targets) {
         int r = pos / width;
         int c = pos % width;
         int height = mapData.length;
-
-        if (r < height && c < mapData[r].length && mapData[r][c] == '.') return false;
-
+    
+        // Fixed: Use binary search against parsed targets instead of literal char matching
+        if (Arrays.binarySearch(targets, pos) >= 0) return false;
+    
         boolean wallUp    = (r == 0)          || (c < mapData[r - 1].length && mapData[r - 1][c] == '#');
         boolean wallDown  = (r == height - 1) || (c < mapData[r + 1].length && mapData[r + 1][c] == '#');
         boolean wallLeft  = (c == 0)          || (c - 1 < mapData[r].length && mapData[r][c - 1] == '#');
         boolean wallRight = (c == width - 1)  || (c + 1 < mapData[r].length && mapData[r][c + 1] == '#');
-
+    
         if ((wallUp || wallDown) && (wallLeft || wallRight)) return true;
-
+    
         return false;
     }
-
-    private void scanAndMarkDeadWall(int startR, int startC, int rowDir, int colDir, boolean[] deadlockMap, char[][] mapData, int width, int height) {
+    
+    private void scanAndMarkDeadWall(int startR, int startC, int rowDir, int colDir, boolean[] deadlockMap, char[][] mapData, int width, int height, int[] targets) {
         int r = startR + rowDir;
         int c = startC + colDir;
         
         List<Integer> path = new ArrayList<>();
         boolean wallSide1Continuous = true;
         boolean wallSide2Continuous = true;
-
+    
         int side1R = colDir; 
         int side1C = rowDir; 
         int side2R = -colDir; 
         int side2C = -rowDir;
-
+    
         while (r > 0 && r < height - 1 && c > 0 && c < width - 1) {
             int pos = r * width + c;
             
             if (c >= mapData[r].length) return;
             if (mapData[r][c] == '#') return;
-            if (mapData[r][c] == '.') return;
-
+            if (Arrays.binarySearch(targets, pos) >= 0) return; // Fixed target validation
+    
             if (c + side1C >= mapData[r + side1R].length || mapData[r + side1R][c + side1C] != '#') wallSide1Continuous = false;
             if (c + side2C >= mapData[r + side2R].length || mapData[r + side2R][c + side2C] != '#') wallSide2Continuous = false;
-
+    
             if (!wallSide1Continuous && !wallSide2Continuous) return;
-
+    
             if (deadlockMap[pos]) {
                 for (int p : path) {
                     deadlockMap[p] = true;
                 }
                 return;
             }
-
+    
             path.add(pos);
             r += rowDir;
             c += colDir;
@@ -223,11 +230,11 @@ public class SokoBot {
         return -1;
     }
 
-    private List<State> getSuccessors(State state, char[][] mapData, boolean[] staticDeadlockMap, int width, int height) {
+    private List<State> getSuccessors(State state, char[][] mapData, boolean[] staticDeadlockMap, int width, int height, int[] targets) {
         List<State> successors = new ArrayList<>();
         int[] boxes = state.boxPositions;
         
-        boolean[] reachable = getReachableTiles(state.normalizedPlayerPos, boxes, mapData, width, height);
+        boolean[] reachable = getReachableTiles(state.actualPlayerPos, boxes, mapData, width, height);
         
         boolean[] hasBox = new boolean[width * height];
         for (int b : boxes) hasBox[b] = true;
@@ -260,9 +267,9 @@ public class SokoBot {
                 if (!reachable[playerPushPos]) continue;
                 if (mapData[nr][nc] == '#' || hasBox[nextBoxPos]) continue;
                 if (staticDeadlockMap[nextBoxPos]) continue;
-                if (creates2x2Deadlock(nextBoxPos, boxes, boxPos, mapData, width)) continue;
+                if (creates2x2Deadlock(nextBoxPos, boxes, boxPos, mapData, width, targets)) continue;
                 
-                String walkPath = findWalkPath(state.normalizedPlayerPos, playerPushPos, boxes, mapData, width, height);
+                String walkPath = findWalkPath(state.actualPlayerPos, playerPushPos, boxes, mapData, width, height);
                 String fullMoveSequence = walkPath + pushChars[d];
                 
                 int[] nextBoxes = boxes.clone();
@@ -270,8 +277,12 @@ public class SokoBot {
                 
                 boolean[] nextReachable = getReachableTiles(boxPos, nextBoxes, mapData, width, height);
                 int nextNormalizedPlayer = getNormalizedPlayerPos(nextReachable);
+
+                // REPLACE YOUR STATE CREATION AT THE BOTTOM WITH THIS:
+                int nextActualPlayer = boxPos; // The player steps into the tile the box just left
+                int nextHCost = getHeuristic(nextBoxes, targets, width);
                 
-                successors.add(new State(nextBoxes, nextNormalizedPlayer, state.gCost + 1, state.path + fullMoveSequence));
+                successors.add(new State(nextBoxes, nextActualPlayer, nextNormalizedPlayer, state.gCost + 1, nextHCost, state.path + fullMoveSequence));
             }
         }
         return successors;
@@ -353,7 +364,7 @@ public class SokoBot {
         return totalDist;
     }
 
-    private boolean creates2x2Deadlock(int newBoxPos, int[] currentBoxes, int oldBoxPos, char[][] mapData, int width) {
+    private boolean creates2x2Deadlock(int newBoxPos, int[] currentBoxes, int oldBoxPos, char[][] mapData, int width, int[] targets) {
         Set<Integer> boxes = new HashSet<>();
         for (int b : currentBoxes) {
             if (b != oldBoxPos) boxes.add(b);
@@ -369,7 +380,8 @@ public class SokoBot {
             int bc = c + offset[1];
             
             if (br >= 0 && bc >= 0) {
-                if (is2x2Filled(br, bc, boxes, mapData, width) && !is2x2AllTargets(br, bc, mapData, width)) {
+                // Pass the targets array into the is2x2AllTargets method here
+                if (is2x2Filled(br, bc, boxes, mapData, width) && !is2x2AllTargets(br, bc, mapData, width, targets)) {
                     return true;
                 }
             }
@@ -394,14 +406,21 @@ public class SokoBot {
         return true;
     }
 
-    private boolean is2x2AllTargets(int r, int c, char[][] mapData, int width) {
+    private boolean is2x2AllTargets(int r, int c, char[][] mapData, int width, int[] targets) {
         int height = mapData.length;
         for (int dr = 0; dr < 2; dr++) {
             for (int dc = 0; dc < 2; dc++) {
                 int nr = r + dr;
                 int nc = c + dc;
                 if (nr < 0 || nr >= height || nc < 0 || nc >= width) return false;
-                if (nc >= mapData[nr].length || mapData[nr][nc] != '.') return false;
+                if (nc >= mapData[nr].length) return false;
+                
+                int posId = nr * width + nc;
+                
+                // If the position ID isn't found in the targets array, it's not a target
+                if (Arrays.binarySearch(targets, posId) < 0) {
+                    return false; 
+                }
             }
         }
         return true;
