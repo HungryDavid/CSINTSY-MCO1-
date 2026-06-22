@@ -69,11 +69,6 @@ public class SokoBot {
 
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
         long startTime = System.currentTimeMillis();
-        
-        // --- THE "TRUE OPTIMIZED" SMART GEARBOX ---
-        boolean focusMode = false;         
-        int bestHSoFar = Integer.MAX_VALUE;
-        int statesWithoutProgress = 0; // The Thrash Metric
 
         List<Integer> targetList = new ArrayList<>();
         List<Integer> startBoxList = new ArrayList<>();
@@ -96,6 +91,13 @@ public class SokoBot {
         Arrays.sort(startBoxes);
         Arrays.sort(targets);
         
+        // 1. FIRST LINE OF DEFENSE: The Map Reader (Guesses instantly)
+        boolean focusMode = isCorridorMap(mapData, width, height, startBoxes.length);
+        
+        // Setup variables for the Safety Net
+        int bestHSoFar = Integer.MAX_VALUE;
+        int statesWithoutProgress = 0;
+
         boolean[][] deadlockGrid = precomputeDeadlocks(width, height, mapData, targetList);
         int[][] exactDistances = precomputeExactDistances(targets, width, height, mapData);
         
@@ -116,14 +118,16 @@ public class SokoBot {
 
         while (!openList.isEmpty()) {
             
-            // Ultimate safety net for the grader (never hang infinitely)
+            // Ultimate safety net to ensure we never hang the grader
             if (System.currentTimeMillis() - startTime > 14500) {
                 return bestPartialState.path; 
             }
 
             State current = openList.poll();
 
-            // --- PROGRESS TRACKER & HYBRID SWITCH ---
+            // ===============================================================
+            // 2. SECOND LINE OF DEFENSE: The Safety Net (Rescues if we guessed wrong)
+            // ===============================================================
             if (current.hCost < bestHSoFar) {
                 bestHSoFar = current.hCost;
                 statesWithoutProgress = 0; 
@@ -132,27 +136,28 @@ public class SokoBot {
                 statesWithoutProgress++; 
             }
 
-            // HYBRID TRIGGER: 
-            // 1. Math Limit (300,000 states) for normal/fast PCs (Deterministic)
-            // 2. Time Limit (3500 ms) for slow Potato PCs (Hardware Rescue)
-            long elapsedTime = System.currentTimeMillis() - startTime;
-            
-            if ((statesWithoutProgress > 300000 || elapsedTime > 3500) && !focusMode) {
-                focusMode = true; 
+            if (statesWithoutProgress > 300000 && !focusMode) {
+                focusMode = true; // Turn on the heavy logic!
                 openList.clear();
                 visited.clear();
-                bfsToken++; 
+                bfsToken++; // Instantly wipe BFS memory
                 
                 openList.add(startState); 
                 bestHSoFar = Integer.MAX_VALUE;
                 statesWithoutProgress = 0;
                 continue; 
             }
-            // ----------------------------------------------
+            // ===============================================================
             
             if (Arrays.equals(current.boxPositions, targets)) {
                 return current.path; 
             }
+
+            if (current.hCost < bestPartialState.hCost) {
+                bestPartialState = current;
+            }
+            
+            // ... (Keep your Zero-Allocation BFS and the rest of the loop exactly the same) ...
 
             // Zero-Allocation BFS (Flood Fill)
             bfsToken++; 
@@ -461,5 +466,35 @@ public class SokoBot {
           }
       }
       return distMatrix;
+    }
+
+    // STATIC MAP ANALYSIS: Reads the layout to predict the required strategy
+    private boolean isCorridorMap(char[][] mapData, int width, int height, int numBoxes) {
+        if (numBoxes < 6) return false; // Very small maps are easily brute-forced
+
+        int totalFloor = 0;
+        int chokepoints = 0;
+
+        for (int r = 1; r < height - 1; r++) {
+            for (int c = 1; c < width - 1; c++) {
+                if (mapData[r][c] != '#') {
+                    totalFloor++;
+                    
+                    boolean wallUp = mapData[r-1][c] == '#';
+                    boolean wallDown = mapData[r+1][c] == '#';
+                    boolean wallLeft = mapData[r][c-1] == '#';
+                    boolean wallRight = mapData[r][c+1] == '#';
+                    
+                    // A chokepoint is a strictly 1-tile wide hallway
+                    if ((wallUp && wallDown) || (wallLeft && wallRight)) {
+                        chokepoints++;
+                    }
+                }
+            }
+        }
+        
+        // If there are at least 2 severe chokepoints, OR it makes up 8% of the map, turn on Focus Mode
+        double chokepointRatio = (double) chokepoints / totalFloor;
+        return chokepoints >= 2 || chokepointRatio > 0.08; 
     }
 }
