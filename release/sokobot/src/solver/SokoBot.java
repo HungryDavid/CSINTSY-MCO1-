@@ -112,7 +112,8 @@ public class SokoBot {
 
             // Win Condition
             if (Arrays.equals(curr.boxPositions, targets)) {
-                return curr.path; 
+                System.out.println("SOLUTION FOUND: " + curr.path);
+                return curr.path;
             }
 
             for (State nextState : getSuccessors(curr, mapData, staticDeadlockMap, width, height, targets)) {
@@ -122,7 +123,8 @@ public class SokoBot {
             }
         }
 
-        return ""; 
+        System.out.println("NO SOLUTION, path length: " + "".length());
+        return "";
     }
 
     private boolean isDeadlock(int pos, int width, char[][] mapData, int[] targets) {
@@ -130,17 +132,18 @@ public class SokoBot {
         int c = pos % width;
         int height = mapData.length;
     
-        // Fixed: Use binary search against parsed targets instead of literal char matching
         if (Arrays.binarySearch(targets, pos) >= 0) return false;
     
-        boolean wallUp    = (r == 0)          || (c < mapData[r - 1].length && mapData[r - 1][c] == '#');
-        boolean wallDown  = (r == height - 1) || (c < mapData[r + 1].length && mapData[r + 1][c] == '#');
-        boolean wallLeft  = (c == 0)          || (c - 1 < mapData[r].length && mapData[r][c - 1] == '#');
-        boolean wallRight = (c == width - 1)  || (c + 1 < mapData[r].length && mapData[r][c + 1] == '#');
+        boolean wallUp    = (r == 0)          || mapData[r - 1][c] == '#';
+        boolean wallDown  = (r == height - 1) || mapData[r + 1][c] == '#';
+        boolean wallLeft  = (c == 0)          || mapData[r][c - 1] == '#';
+        boolean wallRight = (c == width - 1)  || mapData[r][c + 1] == '#';
     
-        if ((wallUp || wallDown) && (wallLeft || wallRight)) return true;
+        // Only a deadlock if it's a TRUE corner: blocked on BOTH horizontal AND vertical
+        if ((wallUp && wallDown)) return false; // open corridor vertically, not a corner
+        if ((wallLeft && wallRight)) return false; // open corridor horizontally, not a corner
     
-        return false;
+        return (wallUp && wallLeft) || (wallUp && wallRight) || (wallDown && wallLeft) || (wallDown && wallRight);
     }
     
     private void scanAndMarkDeadWall(int startR, int startC, int rowDir, int colDir, boolean[] deadlockMap, char[][] mapData, int width, int height, int[] targets) {
@@ -338,7 +341,7 @@ public class SokoBot {
         
         StringBuilder sb = new StringBuilder();
         int curr = end;
-        while (parent.get(curr) != -1) {
+        while (curr != start) {
             sb.append(moveChar.get(curr));
             curr = parent.get(curr);
         }
