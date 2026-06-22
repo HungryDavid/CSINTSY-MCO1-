@@ -78,11 +78,12 @@ public class SokoBot {
         Arrays.sort(targets);
         
         boolean[][] deadlockGrid = precomputeDeadlocks(width, height, mapData, targetList);
+        int[][] exactDistances = precomputeExactDistances(targets, width, height, mapData);
         
         PriorityQueue<State> openList = new PriorityQueue<>();
         Set<State> visited = new HashSet<>();
         
-        int initialH = calculateGreedyHeuristic(startBoxes, targets, width);
+        int initialH = calculateGreedyHeuristic(startBoxes, targets, width, exactDistances);
         State startState = new State(startPId, startBoxes, 0, initialH, "");
         openList.add(startState);
 
@@ -196,7 +197,7 @@ public class SokoBot {
 
                               // Calculate the actual length of the walk
                               int walkCost = walkPath.length();
-                              int newH = calculateGreedyHeuristic(newBoxes, targets, width);
+                              int newH = calculateGreedyHeuristic(newBoxes, targets, width, exactDistances);
 
                               // Add the walkCost to the gCost to penalize wandering aimlessly
                               State nextState = new State(boxId, newBoxes, current.gCost + walkCost + 1, newH, current.path + walkPath + pushMoveChar);
@@ -222,33 +223,36 @@ public class SokoBot {
         return sb.reverse().toString();
     }
 
-    public int calculateGreedyHeuristic(int[] boxPositions, int[] targets, int width) {
-        int totalDistance = 0;
-        boolean[] targetMatched = new boolean[targets.length];
-
-        for (int box : boxPositions) {
-            int br = box / width;
-            int bc = box % width;
-            int minBoxDist = Integer.MAX_VALUE; 
-            int bestTargetIdx = -1;
-
-            for (int i = 0; i < targets.length; i++) {
-                if (targetMatched[i]) continue; 
-                int tr = targets[i] / width;
-                int tc = targets[i] % width;
-                int dist = Math.abs(br - tr) + Math.abs(bc - tc);
-                if (dist < minBoxDist) {
-                    minBoxDist = dist;
-                    bestTargetIdx = i;
-                }
-            }
-            if (bestTargetIdx != -1) {
-                targetMatched[bestTargetIdx] = true;
-                totalDistance += minBoxDist;
-            }
-        }
-        return totalDistance;
-    }
+    public int calculateGreedyHeuristic(int[] boxPositions, int[] targets, int width, int[][] exactDistances) {
+      int totalDistance = 0;
+      boolean[] targetMatched = new boolean[targets.length];
+  
+      for (int box : boxPositions) {
+          int minBoxDist = Integer.MAX_VALUE; 
+          int bestTargetIdx = -1;
+  
+          for (int i = 0; i < targets.length; i++) {
+              if (targetMatched[i]) continue; 
+              
+              // Use the exact precomputed maze distance instead of Manhattan
+              int dist = exactDistances[i][box]; 
+              
+              if (dist < minBoxDist) {
+                  minBoxDist = dist;
+                  bestTargetIdx = i;
+              }
+          }
+          
+          // Bonus Deadlock Detection: If a box literally cannot reach ANY available target, kill the branch
+          if (minBoxDist >= Integer.MAX_VALUE / 2) return Integer.MAX_VALUE / 2;
+  
+          if (bestTargetIdx != -1) {
+              targetMatched[bestTargetIdx] = true;
+              totalDistance += minBoxDist;
+          }
+      }
+      return totalDistance;
+  }
 
     private boolean[][] precomputeDeadlocks(int width, int height, char[][] mapData, List<Integer> targets) {
         boolean[][] deadlocks = new boolean[height][width];
@@ -348,5 +352,44 @@ public class SokoBot {
           if (solids == 4 && hasBoxOffTarget) return true; 
       }
       return false;
-  }
+    }
+
+    private int[][] precomputeExactDistances(int[] targets, int width, int height, char[][] mapData) {
+      // distMatrix[targetIndex][mapPositionId]
+      int[][] distMatrix = new int[targets.length][width * height];
+      
+      // Fill with infinity (using MAX_VALUE / 2 to prevent overflow when adding)
+      for (int[] row : distMatrix) Arrays.fill(row, Integer.MAX_VALUE / 2);
+  
+      int[][] dirs = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+  
+      // Run a BFS radiating outward from every single target
+      for (int i = 0; i < targets.length; i++) {
+          int targetId = targets[i];
+          Queue<Integer> q = new ArrayDeque<>();
+          q.add(targetId);
+          distMatrix[i][targetId] = 0;
+  
+          while (!q.isEmpty()) {
+              int curr = q.poll();
+              int r = curr / width;
+              int c = curr % width;
+  
+              for (int[] d : dirs) {
+                  int nr = r + d[0];
+                  int nc = c + d[1];
+                  
+                  // If it's a valid floor space, calculate exact distance around walls
+                  if (nr >= 0 && nr < height && nc >= 0 && nc < width && mapData[nr][nc] != '#') {
+                      int nId = nr * width + nc;
+                      if (distMatrix[i][nId] > distMatrix[i][curr] + 1) {
+                          distMatrix[i][nId] = distMatrix[i][curr] + 1;
+                          q.add(nId);
+                      }
+                  }
+              }
+          }
+      }
+      return distMatrix;
+    }
 }
