@@ -3,171 +3,251 @@ package solver;
 import java.util.*;
 
 public class SokoBot {
-  
+
     static class State implements Comparable<State> {
-      int playerRow, playerCol; // player location
-      int[] boxPositions; // Swapped HashSet for a primitive sorted array to eliminate memory allocation overhead
-      int gCost; 
-      int hCost; 
-      String path; 
+        int actualPlayerPos; 
+        int normalizedPlayerPos = -1; // Calculated during BFS to neutralize open space
+        int[] boxPositions;
+        int gCost; 
+        int hCost; 
+        String path; 
 
-      public State(int pRow, int pCol, int[] boxes, int gCost, int hCost, String path) {
-        this.playerRow = pRow;
-        this.playerCol = pCol;
-        this.boxPositions = boxes;
-        this.gCost = gCost;
-        this.hCost = hCost;
-        this.path = path;
-      }
+        public State(int actualPlayerPos, int[] boxes, int gCost, int hCost, String path) {
+            this.actualPlayerPos = actualPlayerPos;
+            this.boxPositions = boxes;
+            this.gCost = gCost;
+            this.hCost = hCost;
+            this.path = path;
+        }
 
-      public int getFCost() {
-        return gCost + hCost;
-      }
-
-      @Override 
-      public int compareTo(State other) { // returns the lowest fcost
-        return Integer.compare(this.getFCost(), other.getFCost());
-      }
- 
-      @Override // checks if state is identical/visited before
-      public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof State)) return false;
-        State state = (State) o;
-        return playerRow == state.playerRow && 
-               playerCol == state.playerCol && 
-               Arrays.equals(this.boxPositions, state.boxPositions); 
+        public int getFCost() {
+          // WEIGHTED A*: Multiply the heuristic by a large weight (e.g., 5 or 10)
+          // This sacrifices guaranteed optimal path length for massive speed gains.
+          return gCost + (5 * hCost); 
       }
 
-      @Override
-      public int hashCode() { // checks if the states are the same
-        // Fast hashing function for primitive arrays
-        int result = Objects.hash(playerRow, playerCol);
-        return 31 * result + Arrays.hashCode(boxPositions);
-      }
+        @Override 
+        public int compareTo(State other) { 
+            int fCompare = Integer.compare(this.getFCost(), other.getFCost());
+            if (fCompare == 0) {
+                return Integer.compare(this.hCost, other.hCost); 
+            }
+            return fCompare;
+        }
+
+        @Override 
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof State)) return false;
+            State state = (State) o;
+            // Equality is based on the normalized region, not exact coordinates
+            return normalizedPlayerPos == state.normalizedPlayerPos && 
+                   Arrays.equals(this.boxPositions, state.boxPositions); 
+        }
+
+        @Override
+        public int hashCode() { 
+            int result = Objects.hash(normalizedPlayerPos);
+            return 31 * result + Arrays.hashCode(boxPositions);
+        }
     }
 
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
-      List<Integer> targetList = new ArrayList<>();
-      List<Integer> startBoxList = new ArrayList<>();
-      int startPRow = -1, startPCol = -1;
-      // uses A* search
-      // scans the map for the target/boxes and player
-      for (int r = 0; r < height; r++) {
-          for (int c = 0; c < width; c++) {
-              int posId = r * width + c; 
-              if (mapData[r][c] == '.') targetList.add(posId);
-              if (itemsData[r][c] == '@') {
-                  startPRow = r;
-                  startPCol = c;
-              } else if (itemsData[r][c] == '$') {
-                  startBoxList.add(posId);
-              }
-          }
-      }
+        long startTime = System.currentTimeMillis();
+        long timeLimit = 14500; // 14.5 seconds bailout timer
 
-      int[] targets = targetList.stream().mapToInt(i -> i).toArray();
-      int[] startBoxes = startBoxList.stream().mapToInt(i -> i).toArray();
-      Arrays.sort(startBoxes);
-      
-      // computes the deadlocks of the boxes
-      boolean[][] deadlockGrid = precomputeDeadlocks(width, height, mapData, targetList);
-      
-      // checks every possible state/path
-      PriorityQueue<State> openList = new PriorityQueue<>();
-      Set<State> visited = new HashSet<>();
-      
-      // uses greedy search to calculate box to target matching
-      int initialH = calculateGreedyHeuristic(startBoxes, targets, width);
-      State startState = new State(startPRow, startPCol, startBoxes, 0, initialH, "");
-      openList.add(startState);
-
-      while (!openList.isEmpty()) {
-        State current = openList.poll();
+        List<Integer> targetList = new ArrayList<>();
+        List<Integer> startBoxList = new ArrayList<>();
+        int startPId = -1;
         
-        if (Arrays.equals(current.boxPositions, targets)) {
-          return current.path; 
+        for (int r = 0; r < height; r++) {
+            for (int c = 0; c < width; c++) {
+                int posId = r * width + c; 
+                if (mapData[r][c] == '.') targetList.add(posId);
+                if (itemsData[r][c] == '@') {
+                    startPId = posId;
+                } else if (itemsData[r][c] == '$') {
+                    startBoxList.add(posId);
+                }
+            }
         }
 
-        if (visited.contains(current)) continue;
-        visited.add(current);
+        int[] targets = targetList.stream().mapToInt(i -> i).toArray();
+        int[] startBoxes = startBoxList.stream().mapToInt(i -> i).toArray();
+        Arrays.sort(startBoxes);
+        Arrays.sort(targets);
+        
+        boolean[][] deadlockGrid = precomputeDeadlocks(width, height, mapData, targetList);
+        
+        PriorityQueue<State> openList = new PriorityQueue<>();
+        Set<State> visited = new HashSet<>();
+        
+        int initialH = calculateGreedyHeuristic(startBoxes, targets, width);
+        State startState = new State(startPId, startBoxes, 0, initialH, "");
+        openList.add(startState);
 
+        State bestPartialState = startState;
         int[][] directions = {{-1, 0, 'u'}, {1, 0, 'd'}, {0, -1, 'l'}, {0, 1, 'r'}};
 
-        for (int[] dir : directions) {
-          int nextPRow = current.playerRow + dir[0];
-          int nextPCol = current.playerCol + dir[1];
-          char moveChar = (char) dir[2];
+        while (!openList.isEmpty()) {
+            // Check bailout timer to prevent failure
+            if (System.currentTimeMillis() - startTime > timeLimit) {
+                return bestPartialState.path; 
+            }
 
-          if (nextPRow < 0 || nextPRow >= height || nextPCol < 0 || nextPCol >= width) continue;
-          if (mapData[nextPRow][nextPCol] == '#') continue;
+            State current = openList.poll();
+            
+            // Check win condition
+            if (Arrays.equals(current.boxPositions, targets)) {
+                return current.path; 
+            }
 
-          int nextPosId = nextPRow * width + nextPCol;
-          
-          // simulates pushing the boxes
-          int boxIdx = Arrays.binarySearch(current.boxPositions, nextPosId);
-          boolean isBox = boxIdx >= 0;
+            // Track best state in case of timeout
+            if (current.hCost < bestPartialState.hCost) {
+                bestPartialState = current;
+            }
 
-          int[] newBoxes = current.boxPositions;
+            // --- MACRO-MOVE BFS (Flood Fill) ---
+            Queue<Integer> bfsQueue = new ArrayDeque<>();
+            bfsQueue.add(current.actualPlayerPos);
+            
+            boolean[] reachable = new boolean[width * height];
+            reachable[current.actualPlayerPos] = true;
+            
+            int[] parent = new int[width * height];
+            Arrays.fill(parent, -1);
+            char[] moveLog = new char[width * height];
+            
+            int topOfRoomPosId = current.actualPlayerPos;
 
-          if (isBox) {
-            int nextBRow = nextPRow + dir[0];
-            int nextBCol = nextPCol + dir[1];
-            int newBoxPosId = nextBRow * width + nextBCol;
+            // Phase 1: Flood the room and find normalized pos
+            while (!bfsQueue.isEmpty()) {
+                int currId = bfsQueue.poll();
+                if (currId < topOfRoomPosId) topOfRoomPosId = currId; // Normalize
 
-            if (nextBRow < 0 || nextBRow >= height || nextBCol < 0 || nextBCol >= width) continue;
-            if (mapData[nextBRow][nextBCol] == '#') continue;
-            if (Arrays.binarySearch(current.boxPositions, newBoxPosId) >= 0) continue;
-            if (deadlockGrid[nextBRow][nextBCol]) continue;
+                int r = currId / width;
+                int c = currId % width;
 
-            // Instantly clone and update the array inline
-            newBoxes = current.boxPositions.clone();
-            newBoxes[boxIdx] = newBoxPosId;
-            Arrays.sort(newBoxes);
-          }
-          
-          int nextH = calculateGreedyHeuristic(newBoxes, targets, width);
-          State neighbor = new State(nextPRow, nextPCol, newBoxes, current.gCost + 1, nextH, current.path + moveChar);
-          
-          if (!visited.contains(neighbor)) {
-            openList.add(neighbor);
-          }
+                for (int[] dir : directions) {
+                    int nr = r + dir[0];
+                    int nc = c + dir[1];
+                    int nId = nr * width + nc;
+
+                    if (nr < 0 || nr >= height || nc < 0 || nc >= width || mapData[nr][nc] == '#') continue;
+
+                    // If it's a box, we can't walk on it, but we note we can reach its edge
+                    if (Arrays.binarySearch(current.boxPositions, nId) >= 0) {
+                        continue; 
+                    } else if (!reachable[nId]) {
+                        reachable[nId] = true;
+                        parent[nId] = currId;
+                        moveLog[nId] = (char) dir[2];
+                        bfsQueue.add(nId);
+                    }
+                }
+            }
+
+            // Lock in the normalized position and check if visited
+            current.normalizedPlayerPos = topOfRoomPosId;
+            if (visited.contains(current)) continue;
+            visited.add(current);
+
+            // Phase 2: Generate Crate Pushes from reachable area
+            for (int posId = 0; posId < width * height; posId++) {
+                if (!reachable[posId]) continue; // Only process edges player can stand on
+
+                int pr = posId / width;
+                int pc = posId % width;
+
+                for (int[] dir : directions) {
+                    int br = pr + dir[0];
+                    int bc = pc + dir[1];
+                    int boxId = br * width + bc;
+
+                    // If player is next to a box...
+                    if (br >= 0 && br < height && bc >= 0 && bc < width && Arrays.binarySearch(current.boxPositions, boxId) >= 0) {
+                        
+                        // Check if we can push it
+                        int pushR = br + dir[0];
+                        int pushC = bc + dir[1];
+                        int pushId = pushR * width + pushC;
+
+                        if (pushR >= 0 && pushR < height && pushC >= 0 && pushC < width) {
+                            // ... (inside Phase 2's valid push check) ...
+
+                            if (mapData[pushR][pushC] != '#' && !deadlockGrid[pushR][pushC] && Arrays.binarySearch(current.boxPositions, pushId) < 0) {
+                                
+                              // Valid Push! Generate the move
+                              String walkPath = reconstructPath(posId, current.actualPlayerPos, parent, moveLog);
+                              char pushMoveChar = (char) dir[2];
+
+                              int[] newBoxes = current.boxPositions.clone();
+                              int bIdx = Arrays.binarySearch(newBoxes, boxId);
+                              newBoxes[bIdx] = pushId;
+                              Arrays.sort(newBoxes);
+
+                              // ==========================================
+                              // PLACE THE DEADLOCK CHECK RIGHT HERE
+                              // (Notice we pass 'newBoxes' to check the future state)
+                              // ==========================================
+                              if (isDynamicDeadlock(pushR, pushC, newBoxes, targets, mapData, width, height)) {
+                                  continue; // Prune this branch, we formed an unmovable block!
+                              }
+
+                              // Calculate the actual length of the walk
+                              int walkCost = walkPath.length();
+                              int newH = calculateGreedyHeuristic(newBoxes, targets, width);
+
+                              // Add the walkCost to the gCost to penalize wandering aimlessly
+                              State nextState = new State(boxId, newBoxes, current.gCost + walkCost + 1, newH, current.path + walkPath + pushMoveChar);
+
+                              openList.add(nextState);
+                            }
+                        }
+                    }
+                }
+            }
         }
-      }
-      return ""; 
+        return bestPartialState.path; 
     }
 
-    // assigns targets dynamically using greedy match elimination
+    // Helper to extract the walk path from the BFS
+    private String reconstructPath(int targetNode, int startNode, int[] parent, char[] moveLog) {
+        StringBuilder sb = new StringBuilder();
+        int curr = targetNode;
+        while (curr != startNode && curr != -1) {
+            sb.append(moveLog[curr]);
+            curr = parent[curr];
+        }
+        return sb.reverse().toString();
+    }
+
     public int calculateGreedyHeuristic(int[] boxPositions, int[] targets, int width) {
-      int totalDistance = 0;
-      boolean[] targetMatched = new boolean[targets.length];
+        int totalDistance = 0;
+        boolean[] targetMatched = new boolean[targets.length];
 
-      for (int box : boxPositions) {
-          int br = box / width;
-          int bc = box % width;
-          
-          int minBoxDist = Integer.MAX_VALUE; 
-          int bestTargetIdx = -1;
+        for (int box : boxPositions) {
+            int br = box / width;
+            int bc = box % width;
+            int minBoxDist = Integer.MAX_VALUE; 
+            int bestTargetIdx = -1;
 
-          for (int i = 0; i < targets.length; i++) {
-              if (targetMatched[i]) continue; // Skip already assigned targets
-              
-              int tr = targets[i] / width;
-              int tc = targets[i] % width;
-              
-              int dist = Math.abs(br - tr) + Math.abs(bc - tc);
-              if (dist < minBoxDist) {
-                  minBoxDist = dist;
-                  bestTargetIdx = i;
-              }
-          }
-          
-          if (bestTargetIdx != -1) {
-              targetMatched[bestTargetIdx] = true;
-              totalDistance += minBoxDist;
-          }
-      }
-      return totalDistance;
+            for (int i = 0; i < targets.length; i++) {
+                if (targetMatched[i]) continue; 
+                int tr = targets[i] / width;
+                int tc = targets[i] % width;
+                int dist = Math.abs(br - tr) + Math.abs(bc - tc);
+                if (dist < minBoxDist) {
+                    minBoxDist = dist;
+                    bestTargetIdx = i;
+                }
+            }
+            if (bestTargetIdx != -1) {
+                targetMatched[bestTargetIdx] = true;
+                totalDistance += minBoxDist;
+            }
+        }
+        return totalDistance;
     }
 
     private boolean[][] precomputeDeadlocks(int width, int height, char[][] mapData, List<Integer> targets) {
@@ -207,7 +287,6 @@ public class SokoBot {
     private void verifyAndMarkLine(int startR, int startC, int dRow, int dCol, int width, char[][] mapData, Set<Integer> targets, boolean[][] deadlocks) {
         int height = mapData.length;
         int mapWidth = mapData[0].length;
-        
         int r = startR + dRow;
         int c = startC + dCol;
         List<int[]> pathCells = new ArrayList<>();
@@ -235,10 +314,39 @@ public class SokoBot {
                 }
                 return;
             }
-            
             pathCells.add(new int[]{r, c});
             r += dRow;
             c += dCol;
         }
     }
+
+    private boolean isDynamicDeadlock(int pushR, int pushC, int[] boxes, int[] targets, char[][] mapData, int width, int height) {
+      int[][] dirs = {{0,0}, {-1,0}, {0,-1}, {-1,-1}}; 
+      for (int[] d : dirs) {
+          int startR = pushR + d[0];
+          int startC = pushC + d[1];
+          
+          int solids = 0;
+          boolean hasBoxOffTarget = false;
+          
+          for (int r = startR; r < startR + 2; r++) {
+              for (int c = startC; c < startC + 2; c++) {
+                  if (r < 0 || r >= height || c < 0 || c >= width) break;
+                  
+                  if (mapData[r][c] == '#') {
+                      solids++;
+                  } else {
+                      int posId = r * width + c;
+                      if (Arrays.binarySearch(boxes, posId) >= 0) {
+                          solids++;
+                          if (Arrays.binarySearch(targets, posId) < 0) hasBoxOffTarget = true;
+                      }
+                  }
+              }
+          }
+          // If it forms a 2x2 solid block and at least one box isn't on a target, it's dead.
+          if (solids == 4 && hasBoxOffTarget) return true; 
+      }
+      return false;
+  }
 }
