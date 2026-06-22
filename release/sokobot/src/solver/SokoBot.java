@@ -20,6 +20,7 @@ public class SokoBot {
         int hCost; 
         String path; 
         int lastPushedPos; // MEMORY: Tracks the location of the last box pushed
+        int cachedHash; // MEMORY: Store the hash so we don't recalculate it millions of times
 
         public State(int actualPlayerPos, int[] boxes, int gCost, int hCost, String path, int lastPushedPos) {
             this.actualPlayerPos = actualPlayerPos;
@@ -28,6 +29,10 @@ public class SokoBot {
             this.hCost = hCost;
             this.path = path;
             this.lastPushedPos = lastPushedPos;
+
+            // PRE-CALCULATE HASH
+            int result = Objects.hash(normalizedPlayerPos);
+            this.cachedHash = 31 * result + Arrays.hashCode(boxPositions);
         }
 
         public int getFCost() {
@@ -56,17 +61,19 @@ public class SokoBot {
 
         @Override
         public int hashCode() { 
-            int result = Objects.hash(normalizedPlayerPos);
-            return 31 * result + Arrays.hashCode(boxPositions);
+            return cachedHash; // INSTANT RETURN!
         }
+
+        
     }
 
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
         long startTime = System.currentTimeMillis();
         
-        // --- THE GEARBOX ---
-        boolean focusMode = false;         // Start simple
-        long currentPhaseLimit = 4000;     // Give Simple Mode 4 seconds
+        // --- THE "TRUE OPTIMIZED" SMART GEARBOX ---
+        boolean focusMode = false;         
+        int bestHSoFar = Integer.MAX_VALUE;
+        int statesWithoutProgress = 0; // The Thrash Metric
 
         List<Integer> targetList = new ArrayList<>();
         List<Integer> startBoxList = new ArrayList<>();
@@ -92,7 +99,6 @@ public class SokoBot {
         boolean[][] deadlockGrid = precomputeDeadlocks(width, height, mapData, targetList);
         int[][] exactDistances = precomputeExactDistances(targets, width, height, mapData);
         
-        // Initialize Tokenized Arrays for Zero-Allocation BFS
         int mapSize = width * height;
         reachable = new int[mapSize];
         parent = new int[mapSize];
@@ -109,33 +115,43 @@ public class SokoBot {
         int[][] directions = {{-1, 0, 'u'}, {1, 0, 'd'}, {0, -1, 'l'}, {0, 1, 'r'}};
 
         while (!openList.isEmpty()) {
-            long elapsedTime = System.currentTimeMillis() - startTime;
-
-            // --- THE PHASE SHIFTER (Your Switch!) ---
-            if (elapsedTime > currentPhaseLimit) {
-                if (!focusMode) {
-                    // Phase 1 Failed (Trapped in Orig 3). FLIP THE SWITCH!
-                    focusMode = true;
-                    currentPhaseLimit = 14500; // Give it the remaining 10.5 seconds
-                    openList.clear();
-                    visited.clear();
-                    bfsToken++; // Instantly wipe BFS memory
-                    bestPartialState = startState; // Reset safety net
-                    openList.add(startState); // Restart search with complex logic
-                    continue; 
-                } else {
-                    return bestPartialState.path; // True 14.5s timeout bailout
-                }
+            
+            // Ultimate safety net for the grader (never hang infinitely)
+            if (System.currentTimeMillis() - startTime > 14500) {
+                return bestPartialState.path; 
             }
 
             State current = openList.poll();
+
+            // --- PROGRESS TRACKER & HYBRID SWITCH ---
+            if (current.hCost < bestHSoFar) {
+                bestHSoFar = current.hCost;
+                statesWithoutProgress = 0; 
+                bestPartialState = current;
+            } else {
+                statesWithoutProgress++; 
+            }
+
+            // HYBRID TRIGGER: 
+            // 1. Math Limit (300,000 states) for normal/fast PCs (Deterministic)
+            // 2. Time Limit (3500 ms) for slow Potato PCs (Hardware Rescue)
+            long elapsedTime = System.currentTimeMillis() - startTime;
+            
+            if ((statesWithoutProgress > 300000 || elapsedTime > 3500) && !focusMode) {
+                focusMode = true; 
+                openList.clear();
+                visited.clear();
+                bfsToken++; 
+                
+                openList.add(startState); 
+                bestHSoFar = Integer.MAX_VALUE;
+                statesWithoutProgress = 0;
+                continue; 
+            }
+            // ----------------------------------------------
             
             if (Arrays.equals(current.boxPositions, targets)) {
                 return current.path; 
-            }
-
-            if (current.hCost < bestPartialState.hCost) {
-                bestPartialState = current;
             }
 
             // Zero-Allocation BFS (Flood Fill)
@@ -211,8 +227,7 @@ public class SokoBot {
                                 boolean willBeOnTarget = Arrays.binarySearch(targets, pushId) >= 0;
                                 int targetLockPenalty = (wasOnTarget && !willBeOnTarget) ? 100 : 0;
 
-                                // --- YOUR DYNAMIC SWITCH IN ACTION ---
-                                // Only applies the severe penalty if the bot decided the map was "complex"
+                                // The switch penalty activates only if the AI realizes it's thrashing
                                 int switchPenalty = (focusMode && current.lastPushedPos != -1 && current.lastPushedPos != boxId) ? 20 : 0;
 
                                 int newH = calculateGreedyHeuristic(newBoxes, targets, exactDistances);
