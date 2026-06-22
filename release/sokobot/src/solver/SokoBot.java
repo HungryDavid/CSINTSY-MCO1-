@@ -4,6 +4,14 @@ import java.util.*;
 
 public class SokoBot {
 
+    // =========================================================
+    // CLASS-LEVEL VARIABLES (The Zero-Allocation BFS Engine)
+    // =========================================================
+    private int[] reachable;
+    private int[] parent;
+    private char[] moveLog;
+    private int bfsToken = 0;
+
     static class State implements Comparable<State> {
         int actualPlayerPos; 
         int normalizedPlayerPos = -1; 
@@ -23,7 +31,7 @@ public class SokoBot {
         }
 
         public int getFCost() {
-            // RESTORED FOR SPEED: Weight 5 guarantees Orig 1 and 2 are solved instantly.
+            // Speed Weight (5) guarantees Original 1 and 2 are solved instantly.
             return gCost + (5 * hCost); 
         }
 
@@ -31,7 +39,7 @@ public class SokoBot {
         public int compareTo(State other) { 
             int fCompare = Integer.compare(this.getFCost(), other.getFCost());
             if (fCompare == 0) {
-                // NORMAL TIE-BREAKER: Favor states closer to the goal.
+                // TIE-BREAKER: Favor states closer to the goal.
                 return Integer.compare(this.hCost, other.hCost); 
             }
             return fCompare;
@@ -55,7 +63,10 @@ public class SokoBot {
 
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
         long startTime = System.currentTimeMillis();
-        long timeLimit = 14500; // 14.5 seconds bailout timer
+        
+        // --- THE GEARBOX ---
+        boolean focusMode = false;         // Start simple
+        long currentPhaseLimit = 4000;     // Give Simple Mode 4 seconds
 
         List<Integer> targetList = new ArrayList<>();
         List<Integer> startBoxList = new ArrayList<>();
@@ -81,10 +92,16 @@ public class SokoBot {
         boolean[][] deadlockGrid = precomputeDeadlocks(width, height, mapData, targetList);
         int[][] exactDistances = precomputeExactDistances(targets, width, height, mapData);
         
+        // Initialize Tokenized Arrays for Zero-Allocation BFS
+        int mapSize = width * height;
+        reachable = new int[mapSize];
+        parent = new int[mapSize];
+        moveLog = new char[mapSize];
+        
         PriorityQueue<State> openList = new PriorityQueue<>();
         Set<State> visited = new HashSet<>();
         
-        int initialH = calculateGreedyHeuristic(startBoxes, targets, width, exactDistances);
+        int initialH = calculateGreedyHeuristic(startBoxes, targets, exactDistances);
         State startState = new State(startPId, startBoxes, 0, initialH, "", -1);
         openList.add(startState);
 
@@ -92,40 +109,46 @@ public class SokoBot {
         int[][] directions = {{-1, 0, 'u'}, {1, 0, 'd'}, {0, -1, 'l'}, {0, 1, 'r'}};
 
         while (!openList.isEmpty()) {
-            // Check bailout timer to prevent failure
-            if (System.currentTimeMillis() - startTime > timeLimit) {
-                return bestPartialState.path; 
+            long elapsedTime = System.currentTimeMillis() - startTime;
+
+            // --- THE PHASE SHIFTER (Your Switch!) ---
+            if (elapsedTime > currentPhaseLimit) {
+                if (!focusMode) {
+                    // Phase 1 Failed (Trapped in Orig 3). FLIP THE SWITCH!
+                    focusMode = true;
+                    currentPhaseLimit = 14500; // Give it the remaining 10.5 seconds
+                    openList.clear();
+                    visited.clear();
+                    bfsToken++; // Instantly wipe BFS memory
+                    bestPartialState = startState; // Reset safety net
+                    openList.add(startState); // Restart search with complex logic
+                    continue; 
+                } else {
+                    return bestPartialState.path; // True 14.5s timeout bailout
+                }
             }
 
             State current = openList.poll();
             
-            // Check win condition
             if (Arrays.equals(current.boxPositions, targets)) {
                 return current.path; 
             }
 
-            // Track best state in case of timeout
             if (current.hCost < bestPartialState.hCost) {
                 bestPartialState = current;
             }
 
-            // --- MACRO-MOVE BFS (Flood Fill) ---
+            // Zero-Allocation BFS (Flood Fill)
+            bfsToken++; 
             Queue<Integer> bfsQueue = new ArrayDeque<>();
             bfsQueue.add(current.actualPlayerPos);
-            
-            boolean[] reachable = new boolean[width * height];
-            reachable[current.actualPlayerPos] = true;
-            
-            int[] parent = new int[width * height];
-            Arrays.fill(parent, -1);
-            char[] moveLog = new char[width * height];
+            reachable[current.actualPlayerPos] = bfsToken;
             
             int topOfRoomPosId = current.actualPlayerPos;
 
-            // Phase 1: Flood the room and find normalized pos
             while (!bfsQueue.isEmpty()) {
                 int currId = bfsQueue.poll();
-                if (currId < topOfRoomPosId) topOfRoomPosId = currId; // Normalize
+                if (currId < topOfRoomPosId) topOfRoomPosId = currId;
 
                 int r = currId / width;
                 int c = currId % width;
@@ -137,11 +160,10 @@ public class SokoBot {
 
                     if (nr < 0 || nr >= height || nc < 0 || nc >= width || mapData[nr][nc] == '#') continue;
 
-                    // If it's a box, we can't walk on it, but we note we can reach its edge
                     if (Arrays.binarySearch(current.boxPositions, nId) >= 0) {
                         continue; 
-                    } else if (!reachable[nId]) {
-                        reachable[nId] = true;
+                    } else if (reachable[nId] != bfsToken) {
+                        reachable[nId] = bfsToken;
                         parent[nId] = currId;
                         moveLog[nId] = (char) dir[2];
                         bfsQueue.add(nId);
@@ -149,14 +171,12 @@ public class SokoBot {
                 }
             }
 
-            // Lock in the normalized position and check if visited
             current.normalizedPlayerPos = topOfRoomPosId;
             if (visited.contains(current)) continue;
             visited.add(current);
 
-            // Phase 2: Generate Crate Pushes from reachable area
-            for (int posId = 0; posId < width * height; posId++) {
-                if (!reachable[posId]) continue; // Only process edges player can stand on
+            for (int posId = 0; posId < mapSize; posId++) {
+                if (reachable[posId] != bfsToken) continue; 
 
                 int pr = posId / width;
                 int pc = posId % width;
@@ -166,58 +186,38 @@ public class SokoBot {
                     int bc = pc + dir[1];
                     int boxId = br * width + bc;
 
-                    // If player is next to a box...
                     if (br >= 0 && br < height && bc >= 0 && bc < width && Arrays.binarySearch(current.boxPositions, boxId) >= 0) {
                         
-                        // Check if we can push it
                         int pushR = br + dir[0];
                         int pushC = bc + dir[1];
                         int pushId = pushR * width + pushC;
 
                         if (pushR >= 0 && pushR < height && pushC >= 0 && pushC < width) {
-                            // ... (inside Phase 2's valid push check) ...
-
                             if (mapData[pushR][pushC] != '#' && !deadlockGrid[pushR][pushC] && Arrays.binarySearch(current.boxPositions, pushId) < 0) {
                                 
-                                // Valid Push! Generate the move
-                                String walkPath = reconstructPath(posId, current.actualPlayerPos, parent, moveLog);
-                                char pushMoveChar = (char) dir[2];
-
-                                // ... (inside Phase 2's valid push check) ...
-
                                 int[] newBoxes = current.boxPositions.clone();
                                 int bIdx = Arrays.binarySearch(newBoxes, boxId);
                                 newBoxes[bIdx] = pushId;
                                 Arrays.sort(newBoxes);
 
-                                // ==========================================
-                                // THE DEADLOCK SECURITY CHECKPOINT
-                                // ==========================================
-                                if (isDynamicDeadlock(pushR, pushC, newBoxes, targets, mapData, width, height)) {
-                                    continue; // Prune 2x2 blocks
-                                }
-                                if (isFrozenDeadlock(newBoxes, targets, mapData, width, height)) {
-                                    continue; // Prune Wall-Clamps
-                                }
-                                // REMOVED: isDoorwayTrap. It's too slow.
+                                if (isDynamicDeadlock(pushR, pushC, newBoxes, targets, mapData, width, height)) continue;
+                                if (isFrozenDeadlock(newBoxes, targets, mapData, width, height)) continue;
 
-                                // Calculate the actual length of the walk
+                                String walkPath = reconstructPath(posId, current.actualPlayerPos);
+                                char pushMoveChar = (char) dir[2];
                                 int walkCost = walkPath.length();
-                                int newH = calculateGreedyHeuristic(newBoxes, targets, width, exactDistances);
-
-                                // TARGET-LOCK: Don't push boxes off targets
+                                
                                 boolean wasOnTarget = Arrays.binarySearch(targets, boxId) >= 0;
                                 boolean willBeOnTarget = Arrays.binarySearch(targets, pushId) >= 0;
                                 int targetLockPenalty = (wasOnTarget && !willBeOnTarget) ? 100 : 0;
 
-                                // FOCUS PENALTY: Did we switch boxes?
-                                // If the AI tries to push a different box than last time, hit it with a +20 penalty.
-                                // This forces it to push ONE box entirely down the tunnel, stopping the Orig 3 snowplow.
-                                int switchPenalty = (current.lastPushedPos != -1 && current.lastPushedPos != boxId) ? 20 : 0;
+                                // --- YOUR DYNAMIC SWITCH IN ACTION ---
+                                // Only applies the severe penalty if the bot decided the map was "complex"
+                                int switchPenalty = (focusMode && current.lastPushedPos != -1 && current.lastPushedPos != boxId) ? 20 : 0;
 
-                                // Generate next state (passing pushId so it remembers where this box landed)
+                                int newH = calculateGreedyHeuristic(newBoxes, targets, exactDistances);
+
                                 State nextState = new State(boxId, newBoxes, current.gCost + walkCost + targetLockPenalty + switchPenalty + 1, newH, current.path + walkPath + pushMoveChar, pushId);
-
                                 openList.add(nextState);
                             }
                         }
@@ -228,8 +228,8 @@ public class SokoBot {
         return bestPartialState.path; 
     }
 
-    // Helper to extract the walk path from the BFS
-    private String reconstructPath(int targetNode, int startNode, int[] parent, char[] moveLog) {
+    // Updated reconstructPath to use the zero-allocation class arrays
+    private String reconstructPath(int targetNode, int startNode) {
         StringBuilder sb = new StringBuilder();
         int curr = targetNode;
         while (curr != startNode && curr != -1) {
@@ -239,46 +239,43 @@ public class SokoBot {
         return sb.reverse().toString();
     }
 
-    public int calculateGreedyHeuristic(int[] boxPositions, int[] targets, int width, int[][] exactDistances) {
-      int totalDistance = 0;
-      boolean[] targetMatched = new boolean[targets.length];
-      boolean[] boxMatched = new boolean[boxPositions.length];
-  
-      // Global Greedy Pairing: Find the absolute closest box-target pair, lock them, repeat.
-      for (int step = 0; step < boxPositions.length; step++) {
-          int globalMin = Integer.MAX_VALUE;
-          int bestB = -1;
-          int bestT = -1;
-  
-          for (int b = 0; b < boxPositions.length; b++) {
-              if (boxMatched[b]) continue; // Skip if this box already claimed a target
-              
-              int boxPos = boxPositions[b];
-  
-              for (int t = 0; t < targets.length; t++) {
-                  if (targetMatched[t]) continue; // Skip if this target is already claimed
-                  
-                  int dist = exactDistances[t][boxPos];
-                  if (dist < globalMin) {
-                      globalMin = dist;
-                      bestB = b;
-                      bestT = t;
-                  }
-              }
-          }
-  
-          // Deadlock: If the closest path is infinity, a box is completely blocked from all targets
-          if (globalMin >= Integer.MAX_VALUE / 2) return Integer.MAX_VALUE / 2; 
-  
-          // Lock in the best pair we found
-          if (bestB != -1 && bestT != -1) {
-              boxMatched[bestB] = true;
-              targetMatched[bestT] = true;
-              totalDistance += globalMin;
-          }
-      }
-      
-      return totalDistance;
+    // Upgraded Heuristic: Uses a primitive bitmask for ultra-fast target pairing
+    public int calculateGreedyHeuristic(int[] boxPositions, int[] targets, int[][] exactDistances) {
+        int totalDistance = 0;
+        long targetMatched = 0L; 
+        long boxMatched = 0L;    
+
+        for (int step = 0; step < boxPositions.length; step++) {
+            int globalMin = Integer.MAX_VALUE;
+            int bestB = -1;
+            int bestT = -1;
+
+            for (int b = 0; b < boxPositions.length; b++) {
+                if ((boxMatched & (1L << b)) != 0) continue; 
+                
+                int boxPos = boxPositions[b];
+
+                for (int t = 0; t < targets.length; t++) {
+                    if ((targetMatched & (1L << t)) != 0) continue; 
+                    
+                    int dist = exactDistances[t][boxPos];
+                    if (dist < globalMin) {
+                        globalMin = dist;
+                        bestB = b;
+                        bestT = t;
+                    }
+                }
+            }
+
+            if (globalMin >= Integer.MAX_VALUE / 2) return Integer.MAX_VALUE / 2; 
+
+            if (bestB != -1 && bestT != -1) {
+                boxMatched |= (1L << bestB);
+                targetMatched |= (1L << bestT);
+                totalDistance += globalMin;
+            }
+        }
+        return totalDistance;
     }
 
     private boolean[][] precomputeDeadlocks(int width, int height, char[][] mapData, List<Integer> targets) {
@@ -375,16 +372,13 @@ public class SokoBot {
                   }
               }
           }
-          // If it forms a 2x2 solid block and at least one box isn't on a target, it's dead.
           if (solids == 4 && hasBoxOffTarget) return true; 
       }
       return false;
     }
 
-    // Detects Pic 1: Boxes sliding along a wall and freezing against each other
     private boolean isFrozenDeadlock(int[] boxes, int[] targets, char[][] mapData, int width, int height) {
         for (int b : boxes) {
-            // If the box is already safely parked on a target, it's allowed to be clamped
             if (Arrays.binarySearch(targets, b) >= 0) continue; 
             
             int r = b / width;
@@ -400,7 +394,6 @@ public class SokoBot {
             boolean boxLeft = Arrays.binarySearch(boxes, r*width + c - 1) >= 0;
             boolean boxRight = Arrays.binarySearch(boxes, r*width + c + 1) >= 0;
             
-            // If pushed against a wall, and blocked by a box that is ALSO against that wall = Permanent Freeze
             if (wallLeft) {
                 if (boxUp && mapData[r-1][c-1] == '#') return true; 
                 if (boxDown && mapData[r+1][c-1] == '#') return true; 
@@ -421,17 +414,12 @@ public class SokoBot {
         return false;
     }
 
-    
     private int[][] precomputeExactDistances(int[] targets, int width, int height, char[][] mapData) {
-      // distMatrix[targetIndex][mapPositionId]
       int[][] distMatrix = new int[targets.length][width * height];
-      
-      // Fill with infinity (using MAX_VALUE / 2 to prevent overflow when adding)
       for (int[] row : distMatrix) Arrays.fill(row, Integer.MAX_VALUE / 2);
   
       int[][] dirs = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
   
-      // Run a BFS radiating outward from every single target
       for (int i = 0; i < targets.length; i++) {
           int targetId = targets[i];
           Queue<Integer> q = new ArrayDeque<>();
@@ -447,7 +435,6 @@ public class SokoBot {
                   int nr = r + d[0];
                   int nc = c + d[1];
                   
-                  // If it's a valid floor space, calculate exact distance around walls
                   if (nr >= 0 && nr < height && nc >= 0 && nc < width && mapData[nr][nc] != '#') {
                       int nId = nr * width + nc;
                       if (distMatrix[i][nId] > distMatrix[i][curr] + 1) {
