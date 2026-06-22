@@ -44,11 +44,22 @@ public class SokoBot {
             }
         }
 
-        int[] startBoxes = startBoxNodes.stream().mapToInt(box -> box).toArray();
-        int[] targets = targetNodes.stream().mapToInt(target -> target).toArray();
+        int[] startBoxes = startBoxNodes.stream().mapToInt(i -> i).toArray();
+        int[] targets = targetNodes.stream().mapToInt(i -> i).toArray();
         
+        // CRITICAL: Sort these arrays before they ever touch the State class
         Arrays.sort(startBoxes);
         Arrays.sort(targets);
+
+        int[][] exactDistances = precomputeExactDistances(targets, width, height, mapData);
+
+        int[] initialReachable = getReachableTiles(startPlayerPos, startBoxes, mapData, width, height);
+        int initialNormalizedPlayer = getNormalizedPlayerPos(initialReachable);
+        
+        // Now it knows what exactDistances is!
+        int initialHCost = getHeuristic(startBoxes, targets, exactDistances);
+        
+        State initialState = new State(startBoxes, startPlayerPos, initialNormalizedPlayer, 0, initialHCost, -1, "");
 
         // Safety fallback: if parsing completely failed, abort safely
         if (startPlayerPos == -1 || startBoxes.length == 0 || targets.length == 0) {
@@ -82,18 +93,7 @@ public class SokoBot {
                 }
             }
         }
-        
-        // =========================================================
-        // 3. INITIAL STATE CREATION (Normalizing the starting point)
-        // =========================================================
-        // Create your initial state safely
-        int[] initialReachable = getReachableTiles(startPlayerPos, startBoxes, mapData, width, height);
-        int initialNormalizedPlayer = getNormalizedPlayerPos(initialReachable);
-        int initialHCost = getHeuristic(startBoxes, targets, exactDistances);
-        
-        // ADDED -1 HERE AS THE 6TH ARGUMENT!
-        State initialState = new State(startBoxes, startPlayerPos, initialNormalizedPlayer, 0, initialHCost, -1, "");
-        
+
 
         // =========================================================
         // 4. A* GRAPH SEARCH LOOP
@@ -109,12 +109,7 @@ public class SokoBot {
                 return fCompare;
             }
         });
-
-        // Initialize the first state using the new constructor
-        
-
-
-        State initialState = new State(startBoxes, startPlayerPos, initialNormalizedPlayer, 0, initialHCost, -1, "");
+    
 
         Set<State> closedSet = new HashSet<>();
         openSet.add(initialState);
@@ -248,6 +243,7 @@ public class SokoBot {
 
     // Change it to this:
     private List<State> getSuccessors(State state, char[][] mapData, boolean[] staticDeadlockMap, int width, int height, int[] targets, int[][] exactDistances) {
+        // ... your existing getSuccessors logic ...
         List<State> successors = new ArrayList<>();
         int[] boxes = state.boxPositions;
         
@@ -375,42 +371,19 @@ public class SokoBot {
         return sb.reverse().toString();
     }
 
-    private int getHeuristic(int[] boxPositions, int[] targets, int[][] exactDistances) {
-        int totalDistance = 0;
-        long targetMatched = 0L; 
-        long boxMatched = 0L;    
-
-        for (int step = 0; step < boxPositions.length; step++) {
-            int globalMin = Integer.MAX_VALUE;
-            int bestB = -1;
-            int bestT = -1;
-
-            for (int b = 0; b < boxPositions.length; b++) {
-                if ((boxMatched & (1L << b)) != 0) continue; 
-                int boxPos = boxPositions[b];
-
-                for (int t = 0; t < targets.length; t++) {
-                    if ((targetMatched & (1L << t)) != 0) continue; 
-                    
-                    int dist = exactDistances[t][boxPos];
-                    if (dist < globalMin) {
-                        globalMin = dist;
-                        bestB = b;
-                        bestT = t;
-                    }
+    private int getHeuristic(int[] boxes, int[] targets, int[][] exactDistances) {
+        int h = 0;
+        for (int box : boxes) {
+            int minDist = Integer.MAX_VALUE;
+            // Find the closest target for this specific box using our precomputed distances
+            for (int i = 0; i < targets.length; i++) {
+                if (exactDistances[i][box] < minDist) {
+                    minDist = exactDistances[i][box];
                 }
             }
-
-            // If a box cannot reach ANY target, this state is impossible! Punish it heavily.
-            if (globalMin >= Integer.MAX_VALUE / 2) return Integer.MAX_VALUE / 2; 
-
-            if (bestB != -1 && bestT != -1) {
-                boxMatched |= (1L << bestB);
-                targetMatched |= (1L << bestT);
-                totalDistance += globalMin;
-            }
+            h += minDist;
         }
-        return totalDistance;
+        return h;
     }
 
     // =========================================================
