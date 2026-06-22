@@ -6,30 +6,32 @@ public class SokoBot {
 
     static class State implements Comparable<State> {
         int actualPlayerPos; 
-        int normalizedPlayerPos = -1; // Calculated during BFS to neutralize open space
+        int normalizedPlayerPos = -1; 
         int[] boxPositions;
         int gCost; 
         int hCost; 
         String path; 
+        int lastPushedPos; // MEMORY: Tracks the location of the last box pushed
 
-        public State(int actualPlayerPos, int[] boxes, int gCost, int hCost, String path) {
+        public State(int actualPlayerPos, int[] boxes, int gCost, int hCost, String path, int lastPushedPos) {
             this.actualPlayerPos = actualPlayerPos;
             this.boxPositions = boxes;
             this.gCost = gCost;
             this.hCost = hCost;
             this.path = path;
+            this.lastPushedPos = lastPushedPos;
         }
 
         public int getFCost() {
-          // WEIGHTED A*: Multiply the heuristic by a large weight (e.g., 5 or 10)
-          // This sacrifices guaranteed optimal path length for massive speed gains.
-          return gCost + (5 * hCost);
-      }
+            // RESTORED FOR SPEED: Weight 5 guarantees Orig 1 and 2 are solved instantly.
+            return gCost + (5 * hCost); 
+        }
 
         @Override 
         public int compareTo(State other) { 
             int fCompare = Integer.compare(this.getFCost(), other.getFCost());
             if (fCompare == 0) {
+                // NORMAL TIE-BREAKER: Favor states closer to the goal.
                 return Integer.compare(this.hCost, other.hCost); 
             }
             return fCompare;
@@ -40,7 +42,6 @@ public class SokoBot {
             if (this == o) return true;
             if (!(o instanceof State)) return false;
             State state = (State) o;
-            // Equality is based on the normalized region, not exact coordinates
             return normalizedPlayerPos == state.normalizedPlayerPos && 
                    Arrays.equals(this.boxPositions, state.boxPositions); 
         }
@@ -84,7 +85,7 @@ public class SokoBot {
         Set<State> visited = new HashSet<>();
         
         int initialH = calculateGreedyHeuristic(startBoxes, targets, width, exactDistances);
-        State startState = new State(startPId, startBoxes, 0, initialH, "");
+        State startState = new State(startPId, startBoxes, 0, initialH, "", -1);
         openList.add(startState);
 
         State bestPartialState = startState;
@@ -196,19 +197,26 @@ public class SokoBot {
                                     continue; // Prune 2x2 blocks
                                 }
                                 if (isFrozenDeadlock(newBoxes, targets, mapData, width, height)) {
-                                    continue; // Prune Wall-Clamps (Pic 1)
+                                    continue; // Prune Wall-Clamps
                                 }
-                                if (isDoorwayTrap(newBoxes, targets, mapData, width, height)) {
-                                    continue; // Prune Sealed Rooms (Pic 2)
-                                }
+                                // REMOVED: isDoorwayTrap. It's too slow.
 
-                                // Calculate the actual length of the walk...
                                 // Calculate the actual length of the walk
                                 int walkCost = walkPath.length();
                                 int newH = calculateGreedyHeuristic(newBoxes, targets, width, exactDistances);
 
-                                // Add the walkCost to the gCost to penalize wandering aimlessly
-                                State nextState = new State(boxId, newBoxes, current.gCost + walkCost + 1, newH, current.path + walkPath + pushMoveChar);
+                                // TARGET-LOCK: Don't push boxes off targets
+                                boolean wasOnTarget = Arrays.binarySearch(targets, boxId) >= 0;
+                                boolean willBeOnTarget = Arrays.binarySearch(targets, pushId) >= 0;
+                                int targetLockPenalty = (wasOnTarget && !willBeOnTarget) ? 100 : 0;
+
+                                // FOCUS PENALTY: Did we switch boxes?
+                                // If the AI tries to push a different box than last time, hit it with a +20 penalty.
+                                // This forces it to push ONE box entirely down the tunnel, stopping the Orig 3 snowplow.
+                                int switchPenalty = (current.lastPushedPos != -1 && current.lastPushedPos != boxId) ? 20 : 0;
+
+                                // Generate next state (passing pushId so it remembers where this box landed)
+                                State nextState = new State(boxId, newBoxes, current.gCost + walkCost + targetLockPenalty + switchPenalty + 1, newH, current.path + walkPath + pushMoveChar, pushId);
 
                                 openList.add(nextState);
                             }
@@ -413,76 +421,7 @@ public class SokoBot {
         return false;
     }
 
-    // Detects Pic 2: Boxes pushed onto chokepoints, sealing the room off
-    private boolean isDoorwayTrap(int[] currentBoxes, int[] targets, char[][] mapData, int width, int height) {
-        List<Integer> emptyTargets = new ArrayList<>();
-        List<Integer> unplacedBoxes = new ArrayList<>();
-        Set<Integer> placedBoxes = new HashSet<>();
-
-        // Categorize boxes: Parked vs. Mobile
-        for (int b : currentBoxes) {
-            if (Arrays.binarySearch(targets, b) >= 0) {
-                placedBoxes.add(b);
-            } else {
-                unplacedBoxes.add(b);
-            }
-        }
-        
-        for (int t : targets) {
-            if (!placedBoxes.contains(t)) {
-                emptyTargets.add(t);
-            }
-        }
-
-        if (unplacedBoxes.isEmpty() || emptyTargets.isEmpty()) return false;
-
-        boolean[] visited = new boolean[width * height];
-        Queue<Integer> q = new ArrayDeque<>();
-        
-        // Start a flood fill from ALL empty targets simultaneously
-        for (int t : emptyTargets) {
-            q.add(t);
-            visited[t] = true;
-        }
-
-        int[][] dirs = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-        int reachableUnplacedBoxes = 0;
-
-        while (!q.isEmpty()) {
-            int curr = q.poll();
-            
-            if (unplacedBoxes.contains(curr)) {
-                reachableUnplacedBoxes++;
-            }
-
-            int r = curr / width;
-            int c = curr % width;
-
-            for (int[] d : dirs) {
-                int nr = r + d[0];
-                int nc = c + d[1];
-                if (nr >= 0 && nr < height && nc >= 0 && nc < width) {
-                    int nId = nr * width + nc;
-                    
-                    // 1. If it's a structural brick wall, stop
-                    if (mapData[nr][nc] == '#') continue; 
-                    
-                    // 2. If it's a PLACED box (parked on a target), treat it as a wall, stop
-                    if (placedBoxes.contains(nId)) continue;
-                    
-                    // 3. UNPLACED boxes are treated as floor because they can still be pushed
-                    if (!visited[nId]) {
-                        visited[nId] = true;
-                        q.add(nId);
-                    }
-                }
-            }
-        }
-        
-        // If the empty targets cannot reach ALL unplaced boxes because parked boxes blocked the way, it's a trap!
-        return reachableUnplacedBoxes < unplacedBoxes.size();
-    }
-
+    
     private int[][] precomputeExactDistances(int[] targets, int width, int height, char[][] mapData) {
       // distMatrix[targetIndex][mapPositionId]
       int[][] distMatrix = new int[targets.length][width * height];
