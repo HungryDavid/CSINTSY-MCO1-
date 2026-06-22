@@ -19,7 +19,8 @@ public class SokoBot {
         int gCost; 
         int hCost; 
         String path; 
-        int lastPushedPos; // MEMORY: Tracks the location of the last box pushed
+        int lastPushedPos; 
+        int cachedHash; // MEMORY: Pre-computed hash for instant lookups
 
         public State(int actualPlayerPos, int[] boxes, int gCost, int hCost, String path, int lastPushedPos) {
             this.actualPlayerPos = actualPlayerPos;
@@ -28,10 +29,14 @@ public class SokoBot {
             this.hCost = hCost;
             this.path = path;
             this.lastPushedPos = lastPushedPos;
+
+            // PRE-CALCULATE HASH
+            int result = Objects.hash(normalizedPlayerPos);
+            this.cachedHash = 31 * result + Arrays.hashCode(boxPositions);
         }
 
         public int getFCost() {
-            // Speed Weight (5) guarantees Original 1 and 2 are solved instantly.
+            // Speed Weight (5)
             return gCost + (5 * hCost); 
         }
 
@@ -39,7 +44,6 @@ public class SokoBot {
         public int compareTo(State other) { 
             int fCompare = Integer.compare(this.getFCost(), other.getFCost());
             if (fCompare == 0) {
-                // TIE-BREAKER: Favor states closer to the goal.
                 return Integer.compare(this.hCost, other.hCost); 
             }
             return fCompare;
@@ -56,16 +60,15 @@ public class SokoBot {
 
         @Override
         public int hashCode() { 
-            int result = Objects.hash(normalizedPlayerPos);
-            return 31 * result + Arrays.hashCode(boxPositions);
+            return cachedHash; // INSTANT RETURN!
         }
     }
 
     public String solveSokobanPuzzle(int width, int height, char[][] mapData, char[][] itemsData) {
         long startTime = System.currentTimeMillis();
         
-        // --- THE GEARBOX ---
-        boolean focusMode = false;         // Start simple
+        // --- THE TIME-BASED GEARBOX ---
+        boolean focusMode = false;         
         long currentPhaseLimit = 4000;     // Give Simple Mode 4 seconds
 
         List<Integer> targetList = new ArrayList<>();
@@ -92,7 +95,6 @@ public class SokoBot {
         boolean[][] deadlockGrid = precomputeDeadlocks(width, height, mapData, targetList);
         int[][] exactDistances = precomputeExactDistances(targets, width, height, mapData);
         
-        // Initialize Tokenized Arrays for Zero-Allocation BFS
         int mapSize = width * height;
         reachable = new int[mapSize];
         parent = new int[mapSize];
@@ -111,7 +113,7 @@ public class SokoBot {
         while (!openList.isEmpty()) {
             long elapsedTime = System.currentTimeMillis() - startTime;
 
-            // --- THE PHASE SHIFTER (Your Switch!) ---
+            // --- THE PHASE SHIFTER (4-Second Time Switch) ---
             if (elapsedTime > currentPhaseLimit) {
                 if (!focusMode) {
                     // Phase 1 Failed (Trapped in Orig 3). FLIP THE SWITCH!
@@ -211,8 +213,7 @@ public class SokoBot {
                                 boolean willBeOnTarget = Arrays.binarySearch(targets, pushId) >= 0;
                                 int targetLockPenalty = (wasOnTarget && !willBeOnTarget) ? 100 : 0;
 
-                                // --- YOUR DYNAMIC SWITCH IN ACTION ---
-                                // Only applies the severe penalty if the bot decided the map was "complex"
+                                // The switch penalty activates only if the AI has flipped the 4-second switch
                                 int switchPenalty = (focusMode && current.lastPushedPos != -1 && current.lastPushedPos != boxId) ? 20 : 0;
 
                                 int newH = calculateGreedyHeuristic(newBoxes, targets, exactDistances);
@@ -228,7 +229,6 @@ public class SokoBot {
         return bestPartialState.path; 
     }
 
-    // Updated reconstructPath to use the zero-allocation class arrays
     private String reconstructPath(int targetNode, int startNode) {
         StringBuilder sb = new StringBuilder();
         int curr = targetNode;
@@ -239,7 +239,6 @@ public class SokoBot {
         return sb.reverse().toString();
     }
 
-    // Upgraded Heuristic: Uses a primitive bitmask for ultra-fast target pairing
     public int calculateGreedyHeuristic(int[] boxPositions, int[] targets, int[][] exactDistances) {
         int totalDistance = 0;
         long targetMatched = 0L; 
