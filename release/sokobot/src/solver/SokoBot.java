@@ -23,7 +23,7 @@ public class SokoBot {
         public int getFCost() {
           // WEIGHTED A*: Multiply the heuristic by a large weight (e.g., 5 or 10)
           // This sacrifices guaranteed optimal path length for massive speed gains.
-          return gCost + (5 * hCost); 
+          return gCost + (5 * hCost);
       }
 
         @Override 
@@ -226,33 +226,44 @@ public class SokoBot {
     public int calculateGreedyHeuristic(int[] boxPositions, int[] targets, int width, int[][] exactDistances) {
       int totalDistance = 0;
       boolean[] targetMatched = new boolean[targets.length];
+      boolean[] boxMatched = new boolean[boxPositions.length];
   
-      for (int box : boxPositions) {
-          int minBoxDist = Integer.MAX_VALUE; 
-          int bestTargetIdx = -1;
+      // Global Greedy Pairing: Find the absolute closest box-target pair, lock them, repeat.
+      for (int step = 0; step < boxPositions.length; step++) {
+          int globalMin = Integer.MAX_VALUE;
+          int bestB = -1;
+          int bestT = -1;
   
-          for (int i = 0; i < targets.length; i++) {
-              if (targetMatched[i]) continue; 
+          for (int b = 0; b < boxPositions.length; b++) {
+              if (boxMatched[b]) continue; // Skip if this box already claimed a target
               
-              // Use the exact precomputed maze distance instead of Manhattan
-              int dist = exactDistances[i][box]; 
-              
-              if (dist < minBoxDist) {
-                  minBoxDist = dist;
-                  bestTargetIdx = i;
+              int boxPos = boxPositions[b];
+  
+              for (int t = 0; t < targets.length; t++) {
+                  if (targetMatched[t]) continue; // Skip if this target is already claimed
+                  
+                  int dist = exactDistances[t][boxPos];
+                  if (dist < globalMin) {
+                      globalMin = dist;
+                      bestB = b;
+                      bestT = t;
+                  }
               }
           }
-          
-          // Bonus Deadlock Detection: If a box literally cannot reach ANY available target, kill the branch
-          if (minBoxDist >= Integer.MAX_VALUE / 2) return Integer.MAX_VALUE / 2;
   
-          if (bestTargetIdx != -1) {
-              targetMatched[bestTargetIdx] = true;
-              totalDistance += minBoxDist;
+          // Deadlock: If the closest path is infinity, a box is completely blocked from all targets
+          if (globalMin >= Integer.MAX_VALUE / 2) return Integer.MAX_VALUE / 2; 
+  
+          // Lock in the best pair we found
+          if (bestB != -1 && bestT != -1) {
+              boxMatched[bestB] = true;
+              targetMatched[bestT] = true;
+              totalDistance += globalMin;
           }
       }
+      
       return totalDistance;
-  }
+    }
 
     private boolean[][] precomputeDeadlocks(int width, int height, char[][] mapData, List<Integer> targets) {
         boolean[][] deadlocks = new boolean[height][width];
