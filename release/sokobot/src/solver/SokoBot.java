@@ -16,6 +16,12 @@ public class SokoBot {
     private String[] movePaths;
     private int bfsToken = 0;
 
+    // NEW: Zero-Allocation Hungarian Memory
+    private int[][] hungarianCostMatrix;
+    private int[] hungarianU, hungarianV, hungarianP, hungarianWay, hungarianMinV;
+    private boolean[] hungarianUsed;
+    private final int MAX_BOXES = 40; // Maximum number of crates a map will realistically have
+
     // NEW: Zobrist Hashing Table
     // [Tile ID][0 for Player, 1 for Crate]
     private long[][] zobristTable;
@@ -80,6 +86,15 @@ public class SokoBot {
         // NEW: Initialize BFS arrays once to stop memory leaks
         reachable = new int[width * height];
         movePaths = new String[width * height];
+
+        // Initialize Zero-Allocation Hungarian Memory
+        hungarianCostMatrix = new int[MAX_BOXES][MAX_BOXES];
+        hungarianU = new int[MAX_BOXES + 1];
+        hungarianV = new int[MAX_BOXES + 1];
+        hungarianP = new int[MAX_BOXES + 1];
+        hungarianWay = new int[MAX_BOXES + 1];
+        hungarianMinV = new int[MAX_BOXES + 1];
+        hungarianUsed = new boolean[MAX_BOXES + 1];
 
         // 1. Pre-compute static traps and true distances
         initTargets(mapData);       // MUST GO FIRST! Creates the isTargetTile array.
@@ -254,48 +269,22 @@ public class SokoBot {
     // --- HELPER METHODS ---
 
     /**
-     * Instantly looks up the pre-calculated true distance for every crate.
-     */
-    /**
-     * Calculates the heuristic by forcing every crate to claim a UNIQUE target.
+     * Calculates the flawless heuristic using the Hungarian Algorithm Matrix.
      */
     private int calculateHeuristic(List<Integer> crates) {
-        int totalDistance = 0;
-        boolean[] targetUsed = new boolean[targets.size()];
-        boolean[] crateUsed = new boolean[crates.size()];
-
-        // Loop until every crate has claimed a target
-        for (int step = 0; step < crates.size(); step++) {
-            int minDistance = 999999;
-            int bestCrateIndex = -1;
-            int bestTargetIndex = -1;
-
-            // Find the absolute closest unmatched Crate-Target pair
-            for (int c = 0; c < crates.size(); c++) {
-                if (crateUsed[c]) continue;
-                int cr = crates.get(c) / width;
-                int cc = crates.get(c) % width;
-
-                for (int t = 0; t < targets.size(); t++) {
-                    if (targetUsed[t]) continue;
-                    
-                    int dist = trueDistances[t][cr][cc];
-                    if (dist < minDistance) {
-                        minDistance = dist;
-                        bestCrateIndex = c;
-                        bestTargetIndex = t;
-                    }
-                }
-            }
-
-            // Lock in the claim and add the distance to our score
-            if (bestCrateIndex != -1 && bestTargetIndex != -1) {
-                crateUsed[bestCrateIndex] = true;
-                targetUsed[bestTargetIndex] = true;
-                totalDistance += minDistance;
+        int n = crates.size();
+        if (n == 0) return 0;
+        
+        for (int c = 0; c < n; c++) {
+            int cr = crates.get(c) / width;
+            int cc = crates.get(c) % width;
+            
+            for (int t = 0; t < targets.size(); t++) {
+                hungarianCostMatrix[c][t] = trueDistances[t][cr][cc];
             }
         }
-        return totalDistance;
+        
+        return computeHungarian(n);
     }
 
     private void initTargets(char[][] mapData) {
@@ -549,5 +538,59 @@ public class SokoBot {
             zobristTable[i][0] = rnd.nextLong(); // Random 64-bit number for Player here
             zobristTable[i][1] = rnd.nextLong(); // Random 64-bit number for Crate here
         }
+    }
+
+    /**
+     * THE HUNGARIAN ALGORITHM: Computes the absolute minimum cost to pair N crates with N targets.
+     * Takes a 2D matrix of distances and returns the flawless minimum total distance.
+     */
+    private int computeHungarian(int n) {
+        // Wipe the primitive arrays clean for this specific calculation
+        Arrays.fill(hungarianU, 0, n + 1, 0);
+        Arrays.fill(hungarianV, 0, n + 1, 0);
+        Arrays.fill(hungarianP, 0, n + 1, 0);
+        Arrays.fill(hungarianWay, 0, n + 1, 0);
+
+        for (int i = 1; i <= n; i++) {
+            hungarianP[0] = i;
+            int j0 = 0;
+            Arrays.fill(hungarianMinV, 0, n + 1, 999999);
+            Arrays.fill(hungarianUsed, 0, n + 1, false);
+            
+            do {
+                hungarianUsed[j0] = true;
+                int i0 = hungarianP[j0], delta = 999999, j1 = 0;
+                
+                for (int j = 1; j <= n; j++) {
+                    if (!hungarianUsed[j]) {
+                        int cur = hungarianCostMatrix[i0 - 1][j - 1] - hungarianU[i0] - hungarianV[j];
+                        if (cur < hungarianMinV[j]) {
+                            hungarianMinV[j] = cur;
+                            hungarianWay[j] = j0;
+                        }
+                        if (hungarianMinV[j] < delta) {
+                            delta = hungarianMinV[j];
+                            j1 = j;
+                        }
+                    }
+                }
+                for (int j = 0; j <= n; j++) {
+                    if (hungarianUsed[j]) {
+                        hungarianU[hungarianP[j]] += delta;
+                        hungarianV[j] -= delta;
+                    } else {
+                        hungarianMinV[j] -= delta;
+                    }
+                }
+                j0 = j1;
+            } while (hungarianP[j0] != 0);
+            
+            do {
+                int j1 = hungarianWay[j0];
+                hungarianP[j0] = hungarianP[j1];
+                j0 = j1;
+            } while (j0 != 0);
+        }
+        return -hungarianV[0];
     }
 }
