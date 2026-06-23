@@ -137,16 +137,19 @@ public class SokoBot {
         GameState initialState = new GameState(startPr, startPc, startCratesArr, null, "", 0, -1, initialCrateHash); 
         queue.add(initialState);
 
+        // NEW: Track the best partial solution for the timeout fallback
+        GameState bestState = initialState;
+        int minH = initialState.h;
+
         // 4. Execution Search
         while (!queue.isEmpty()) {
+            // Safety Switch
             // Safety Switch
             if (System.currentTimeMillis() - startTime > 14000) {
                 System.out.println("Time limit reached! Returning best effort.");
                 
-                // Reconstruct the path using the parent pointers!
-                GameState bestEffort = queue.peek();
                 StringBuilder fallbackPath = new StringBuilder();
-                GameState trace = bestEffort;
+                GameState trace = bestState; // FIXED: Trace from the deepest state!
                 while (trace != null && trace.parent != null) {
                     fallbackPath.insert(0, trace.moveFromParent);
                     trace = trace.parent;
@@ -155,6 +158,12 @@ public class SokoBot {
             }
 
             GameState curr = queue.poll();
+
+            // Update the deepest state tracker
+            if (curr.h < minH) {
+                minH = curr.h;
+                bestState = curr;
+            }
 
             for (int i = 0; i < curr.crates.length; i++) {
                 crateMap[curr.crates[i]] = true;
@@ -262,6 +271,8 @@ public class SokoBot {
 
                     String walkPath = movePaths[pushStandPos];
                     int walkCost = walkPath.length();
+                    
+                    // REVERT: Bring back the Focus Mechanics!
                     int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[finalCratePos]) ? 10 : 0;
                     int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 5 : 0;
                     int newGCost = curr.gCost + walkCost + targetLockPenalty + slidePushes + switchPenalty;
@@ -532,16 +543,16 @@ public class SokoBot {
             
             if (isTargetTile[cratePos]) continue; 
 
-            boolean wallUp = mapData[r-1][c] == '#';
-            boolean wallDown = mapData[r+1][c] == '#';
-            boolean wallLeft = mapData[r][c-1] == '#';
-            boolean wallRight = mapData[r][c+1] == '#';
+            // FIXED: Safe array bounds checking
+            boolean wallUp = (r == 0) || mapData[r-1][c] == '#';
+            boolean wallDown = (r == height-1) || mapData[r+1][c] == '#';
+            boolean wallLeft = (c == 0) || mapData[r][c-1] == '#';
+            boolean wallRight = (c == width-1) || mapData[r][c+1] == '#';
             
-            // O(1) Instant array lookups instead of .contains()!
-            boolean boxUp = crateMap[(r-1)*width + c];
-            boolean boxDown = crateMap[(r+1)*width + c];
-            boolean boxLeft = crateMap[r*width + c - 1];
-            boolean boxRight = crateMap[r*width + c + 1];
+            boolean boxUp = (r > 0) && crateMap[(r-1)*width + c];
+            boolean boxDown = (r < height-1) && crateMap[(r+1)*width + c];
+            boolean boxLeft = (c > 0) && crateMap[r*width + c - 1];
+            boolean boxRight = (c < width-1) && crateMap[r*width + c + 1];
             
             if (wallLeft && ((boxUp && mapData[r-1][c-1] == '#') || (boxDown && mapData[r+1][c-1] == '#'))) return true;
             if (wallRight && ((boxUp && mapData[r-1][c+1] == '#') || (boxDown && mapData[r+1][c+1] == '#'))) return true;
