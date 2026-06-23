@@ -148,28 +148,67 @@ public class SokoBot {
                     nextCrates.remove(Integer.valueOf(cratePos)); 
                     nextCrates.add(newCratePos);
 
-                    // Filter 3: Static Deadlines, 2x2s, and Frozen Deadlocks
-                    if (deadTiles[newCrateR][newCrateC] || 
-                        isTwoByTwoDeadlock(newCrateR, newCrateC, nextCrates, mapData) ||
+                    // --- THE HIGHWAY SYSTEM (Tunnel Macros) ---
+                    int slideR = newCrateR;
+                    int slideC = newCrateC;
+                    int playerWalkR = cr;
+                    int playerWalkC = cc;
+                    int slidePushes = 1;
+                    String tunnelPath = "" + pushChars[dir];
+
+                    while (true) {
+                        // Are we boxed into a 1-tile wide hallway?
+                        boolean isHorizTunnel = mapData[slideR - 1][slideC] == '#' && mapData[slideR + 1][slideC] == '#';
+                        boolean isVertTunnel = mapData[slideR][slideC - 1] == '#' && mapData[slideR][slideC + 1] == '#';
+                        
+                        // STOP condition 1: We hit a target! Don't slide past it.
+                        if (isTargetTile[slideR * width + slideC]) break;
+                        
+                        // STOP condition 2: We are no longer trapped in a strict highway
+                        if ((dir == 0 || dir == 1) && !isVertTunnel) break; // Moving Up/Down needs Left/Right walls
+                        if ((dir == 2 || dir == 3) && !isHorizTunnel) break; // Moving Left/Right needs Up/Down walls
+
+                        int nextSlideR = slideR + pushDr[dir];
+                        int nextSlideC = slideC + pushDc[dir];
+                        int nextPos = nextSlideR * width + nextSlideC;
+
+                        // STOP condition 3: Obstacle ahead or entering a dead corner
+                        if (mapData[nextSlideR][nextSlideC] == '#' || nextCrates.contains(nextPos) || deadTiles[nextSlideR][nextSlideC]) {
+                            break;
+                        }
+
+                        // Safe to slide! Fast-forward the physics.
+                        nextCrates.remove(Integer.valueOf(slideR * width + slideC));
+                        nextCrates.add(nextPos);
+                        playerWalkR = slideR;
+                        playerWalkC = slideC;
+                        slideR = nextSlideR;
+                        slideC = nextSlideC;
+                        tunnelPath += pushChars[dir];
+                        slidePushes++;
+                    }
+
+                    // Filter 3: Check static & dynamic deadlocks at the FINAL destination
+                    if (deadTiles[slideR][slideC] || 
+                        isTwoByTwoDeadlock(slideR, slideC, nextCrates, mapData) ||
                         isFrozenDeadlock(nextCrates, mapData)) {
                         continue;
                     }
 
-                    // --- THE SECRET SAUCE (Momentum & Penalties) ---
+                    // --- THE SECRET SAUCE (The Dynamic Balance) ---
                     String walkPath = movePaths[pushStandPos];
                     int walkCost = walkPath.length();
                     
-                    // SOFT PENALTY: Gently discourage pushing off targets, but allow it if necessary.
-                    int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[newCratePos]) ? 10 : 0;
+                    int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[slideR * width + slideC]) ? 10 : 0;
                     
-                    // SOFT PENALTY: Gently prefer keeping momentum on the same box, but allow shuffling.
-                    int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 2 : 0;
+                    // THE FIX: The Soft Momentum Penalty
+                    // 5 is cheap enough to let Orig2 shuffle, but heavy enough to stop Orig3 from Traffic Jamming!
+                    int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 5 : 0;
+                    
+                    int newGCost = curr.gCost + walkCost + targetLockPenalty + slidePushes + switchPenalty;
+                    String fullPath = curr.path + walkPath + tunnelPath;
 
-                    // Add everything to the gCost
-                    int newGCost = curr.gCost + walkCost + targetLockPenalty + switchPenalty + 1;
-                    String fullPath = curr.path + walkPath + pushChars[dir];
-
-                    GameState nextState = new GameState(cr, cc, nextCrates, fullPath, newGCost, newCratePos);
+                    GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, fullPath, newGCost, slideR * width + slideC);
                     queue.add(nextState);
                 }
             }
