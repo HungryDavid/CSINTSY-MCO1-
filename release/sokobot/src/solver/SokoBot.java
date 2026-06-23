@@ -32,18 +32,23 @@ public class SokoBot {
         int playerR, playerC;
         int normalizedPlayerPos = -1; 
         int[] crates; // THE ARCHITECTURAL UPGRADE: Pure primitives!
-        String path;
+        GameState parent; // A reference to the state that created this one
+        String moveFromParent; // Only the 2-5 characters it took to get here
         int h; 
         int gCost; 
         int lastPushedPos; 
         long crateHash; 
 
-        public GameState(int pr, int pc, int[] crates, String path, int gCost, int lastPushedPos, long crateHash) {
+        public GameState(int pr, int pc, int[] crates, GameState parent, String moveFromParent, int gCost, int lastPushedPos, long crateHash) {
             this.playerR = pr;
             this.playerC = pc;
             this.crates = crates;
             Arrays.sort(this.crates); // Primitive sort, zero object creation!
-            this.path = path;
+            
+            // THE UPGRADE: Parent Pointers instead of massive Strings
+            this.parent = parent; 
+            this.moveFromParent = moveFromParent; 
+            
             this.h = calculateHeuristic(this.crates);
             this.gCost = gCost; 
             this.lastPushedPos = lastPushedPos;
@@ -127,7 +132,8 @@ public class SokoBot {
             startCratesArr[i] = startCrates.get(i);
         }
 
-        GameState initialState = new GameState(startPr, startPc, startCratesArr, "", 0, -1, initialCrateHash); 
+        // Pass 'null' for the parent, and "" for the move!
+        GameState initialState = new GameState(startPr, startPc, startCratesArr, null, "", 0, -1, initialCrateHash); 
         queue.add(initialState);
 
         // 4. Execution Search
@@ -135,7 +141,16 @@ public class SokoBot {
             // Safety Switch
             if (System.currentTimeMillis() - startTime > 14000) {
                 System.out.println("Time limit reached! Returning best effort.");
-                return queue.peek().path; 
+                
+                // Reconstruct the path using the parent pointers!
+                GameState bestEffort = queue.peek();
+                StringBuilder fallbackPath = new StringBuilder();
+                GameState trace = bestEffort;
+                while (trace != null && trace.parent != null) {
+                    fallbackPath.insert(0, trace.moveFromParent);
+                    trace = trace.parent;
+                }
+                return fallbackPath.toString(); 
             }
 
             GameState curr = queue.poll();
@@ -153,7 +168,15 @@ public class SokoBot {
             }
             visited.add(curr);
 
-            if (curr.h == 0) return curr.path; 
+            if (curr.h == 0) { 
+                StringBuilder winningPath = new StringBuilder();
+                GameState trace = curr;
+                while (trace.parent != null) {
+                    winningPath.insert(0, trace.moveFromParent);
+                    trace = trace.parent;
+                }
+                return winningPath.toString(); 
+            }
 
             for (int i = 0; i < curr.crates.length; i++) {
                 int cratePos = curr.crates[i];
@@ -240,7 +263,7 @@ public class SokoBot {
                     newCrateHash ^= zobristTable[cratePos][1];               
                     newCrateHash ^= zobristTable[finalCratePos][1]; 
 
-                    GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, curr.path + walkPath + tunnelPath, newGCost, finalCratePos, newCrateHash);
+                    GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, curr, walkPath + tunnelPath, newGCost, finalCratePos, newCrateHash);
                     queue.add(nextState);
                 }
             }
