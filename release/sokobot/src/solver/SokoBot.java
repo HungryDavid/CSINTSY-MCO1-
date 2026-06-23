@@ -180,15 +180,12 @@ public class SokoBot {
                     int newCrateR = cr + PUSH_DR[dir];
                     int newCrateC = cc + PUSH_DC[dir];
                     int newCratePos = newCrateR * width + newCrateC;
-
-                    // THE UPGRADE: Use instant O(1) array instead of curr.cratePositions.contains()
+// THE UPGRADE: Use instant O(1) array instead of curr.cratePositions.contains()
                     if (mapData[newCrateR][newCrateC] == '#' || crateMap[newCratePos]) {
                         continue; 
                     }
 
-                    List<Integer> nextCrates = new ArrayList<>(curr.cratePositions);
-                    nextCrates.remove(Integer.valueOf(cratePos)); 
-                    nextCrates.add(newCratePos);
+                    // DELETE the nextCrates initialization here! We wait until the slide is done.
 
                     // --- THE HIGHWAY SYSTEM (Tunnel Macros) ---
                     int slideR = newCrateR;
@@ -203,26 +200,20 @@ public class SokoBot {
                         boolean isHorizTunnel = mapData[slideR - 1][slideC] == '#' && mapData[slideR + 1][slideC] == '#';
                         boolean isVertTunnel = mapData[slideR][slideC - 1] == '#' && mapData[slideR][slideC + 1] == '#';
                         
-                        // STOP condition 1: We hit a target! Don't slide past it.
                         if (isTargetTile[slideR * width + slideC]) break;
-                        
-                        // STOP condition 2: We are no longer trapped in a strict highway
-                        if ((dir == 0 || dir == 1) && !isVertTunnel) break; // Moving Up/Down needs Left/Right walls
-                        if ((dir == 2 || dir == 3) && !isHorizTunnel) break; // Moving Left/Right needs Up/Down walls
+                        if ((dir == 0 || dir == 1) && !isVertTunnel) break; 
+                        if ((dir == 2 || dir == 3) && !isHorizTunnel) break; 
 
                         int nextSlideR = slideR + PUSH_DR[dir];
                         int nextSlideC = slideC + PUSH_DC[dir];
                         int nextPos = nextSlideR * width + nextSlideC;
 
                         // THE O(1) UPGRADE: Check the crateMap for collisions!
-                        // (We ignore cratePos because the box we are pushing just moved from there)
                         if (mapData[nextSlideR][nextSlideC] == '#' || (crateMap[nextPos] && nextPos != cratePos) || deadTiles[nextSlideR][nextSlideC]) {
                             break;
                         }
 
-                        // Safe to slide! Fast-forward the physics.
-                        nextCrates.remove(Integer.valueOf(slideR * width + slideC));
-                        nextCrates.add(nextPos);
+                        // Safe to slide! Fast-forward the physics. (NO ARRAYLIST UPDATES HERE!)
                         playerWalkR = slideR;
                         playerWalkC = slideC;
                         slideR = nextSlideR;
@@ -230,6 +221,18 @@ public class SokoBot {
                         tunnelPath += PUSH_CHARS[dir];
                         slidePushes++;
                     }
+
+                    // --- THE FINAL LIST CONSTRUCTION ---
+                    // The box has stopped sliding. Now we build the new list exactly ONCE.
+                    int finalCratePos = slideR * width + slideC;
+                    List<Integer> nextCrates = new ArrayList<>(curr.cratePositions.size());
+                    for (int j = 0; j < curr.cratePositions.size(); j++) {
+                        int cPos = curr.cratePositions.get(j);
+                        if (cPos != cratePos) {
+                            nextCrates.add(cPos); // Keep all the boxes that didn't move
+                        }
+                    }
+                    nextCrates.add(finalCratePos); // Add the one box that did move
 
                     // Filter 3: Check static & dynamic deadlocks at the FINAL destination
                     if (deadTiles[slideR][slideC] || 
