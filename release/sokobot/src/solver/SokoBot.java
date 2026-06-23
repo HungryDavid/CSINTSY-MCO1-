@@ -6,25 +6,33 @@ public class SokoBot {
 
     // --- GLOBAL VARIABLES ---
     private boolean[][] deadTiles;
-    private int[][][] trueDistances; // UPGRADED: [targetIndex][row][col]
+    private int[][][] trueDistances;
     private int width, height;
     private List<Integer> targets;
-    // --- STATE REPRESENTATION (Upgraded for A*) ---
+    private boolean[] isTargetTile; // NEW: Instant target lookup
+    
+    // Zero-Allocation BFS Memory
+    private int[] reachable;
+    private String[] movePaths;
+    private int bfsToken = 0;
+
     class GameState implements Comparable<GameState> {
         int playerR, playerC;
         List<Integer> cratePositions;
         String path;
         int h; 
-        int pushes; // NEW: Track the number of pushes, not footsteps
+        int gCost; // Replaces pushes. Tracks total walk cost + pushes + penalties
+        int lastPushedPos; // Tracks the last box pushed for momentum
 
-        public GameState(int pr, int pc, List<Integer> crates, String path, int pushes) {
+        public GameState(int pr, int pc, List<Integer> crates, String path, int gCost, int lastPushedPos) {
             this.playerR = pr;
             this.playerC = pc;
             this.cratePositions = new ArrayList<>(crates);
             Collections.sort(this.cratePositions);
             this.path = path;
             this.h = calculateHeuristic(this.cratePositions);
-            this.pushes = pushes; // NEW
+            this.gCost = gCost; 
+            this.lastPushedPos = lastPushedPos;
         }
 
         public String getHash() {
@@ -33,16 +41,13 @@ public class SokoBot {
 
         @Override
         public int compareTo(GameState other) {
-            int thisScore = this.pushes + this.h; 
-            int otherScore = other.pushes + other.h;
+            int thisScore = this.gCost + (5 * this.h); 
+            int otherScore = other.gCost + (5 * other.h);
 
-            // THE TIE-BREAKER: If the overall scores are identical...
+            // Tie-breaker: If scores are equal, prioritize the state physically closer to the goals
             if (thisScore == otherScore) {
-                // Prioritize the timeline that has made MORE pushes.
-                // This gives the bot "momentum" so it doesn't abandon crates.
-                return Integer.compare(other.pushes, this.pushes);
+                return Integer.compare(this.h, other.h); 
             }
-
             return Integer.compare(thisScore, otherScore);
         }
     }
@@ -53,9 +58,13 @@ public class SokoBot {
         this.height = h;
         long startTime = System.currentTimeMillis();
 
+        // NEW: Initialize BFS arrays once to stop memory leaks
+        reachable = new int[width * height];
+        movePaths = new String[width * height];
+
         // 1. Pre-compute static traps and true distances
-        initDeadTiles(mapData);
-        initTargets(mapData);       // MUST BE BEFORE TRUE DISTANCES
+        initTargets(mapData);       // MUST GO FIRST! Creates the isTargetTile array.
+        initDeadTiles(mapData);     // Now it can safely use the array.
         initTrueDistances(mapData);
 
         // 2. Find starting positions
@@ -76,9 +85,8 @@ public class SokoBot {
         PriorityQueue<GameState> queue = new PriorityQueue<>();
         HashSet<String> visited = new HashSet<>();
 
-        GameState initialState = new GameState(startPr, startPc, startCrates, "", 0); 
+        GameState initialState = new GameState(startPr, startPc, startCrates, "", 0, -1);
         queue.add(initialState);
-        visited.add(initialState.getHash());
 
         int[] dr = {-1, 1, 0, 0};
         int[] dc = {0, 0, -1, 1};
@@ -86,8 +94,6 @@ public class SokoBot {
 
         // 4. Execution Search
         while (!queue.isEmpty()) {
-            int statesExplored = 0;
-            int maxDepth = 0;
             // Safety Switch
             if (System.currentTimeMillis() - startTime > 14000) {
                 System.out.println("Time limit reached! Returning best effort.");
@@ -96,89 +102,75 @@ public class SokoBot {
 
             GameState curr = queue.poll();
 
-            statesExplored++;
-            if (curr.pushes > maxDepth) maxDepth = curr.pushes;
+            // 1. Map territory AND get the normalized Room ID
+            int normalizedPlayerID = runZeroAllocationBFS(curr.playerR, curr.playerC, curr.cratePositions, mapData);
 
-            // Print a diagnostic heartbeat every 5,000 states
-            if (statesExplored % 100 == 0) {
-                System.out.println("Explored: " + statesExplored + 
-                                   " | Queue: " + queue.size() + 
-                                   " | Max Depth (Pushes): " + maxDepth + 
-                                   " | Current Score (h): " + curr.h);
-            }
+            // 2. STATE NORMALIZATION: Have we seen this exact room+crate combo before?
+            String normalizedHash = normalizedPlayerID + "-" + curr.cratePositions.toString();
+            if (visited.contains(normalizedHash)) continue; // Instantly drop the duplicate!
+            visited.add(normalizedHash); // Mark as seen
 
             // Check if we won
-            if (curr.h == 0) { // If distance to targets is 0, we won!
+            if (curr.h == 0) { 
                 return curr.path; 
             }
-
-            // 1. Map out the player's territory and footsteps
-            HashMap<Integer, String> reachable = getReachableTiles(curr.playerR, curr.playerC, curr.cratePositions, mapData);
 
             int[] pushDr = {-1, 1, 0, 0};
             int[] pushDc = {0, 0, -1, 1};
             char[] pushChars = {'u', 'd', 'l', 'r'};
 
-            // 2. Iterate over EVERY crate on the board
+            // 3. Iterate over EVERY crate on the board
             for (int i = 0; i < curr.cratePositions.size(); i++) {
                 int cratePos = curr.cratePositions.get(i);
                 int cr = cratePos / width;
                 int cc = cratePos % width;
 
-                // 3. For each crate, check all 4 possible push directions
+                // 4. For each crate, check all 4 possible push directions
                 for (int dir = 0; dir < 4; dir++) {
                     
-                    // The trick: to push a crate DOWN (dir=1), the player must stand ABOVE it
                     int pushStandR = cr - pushDr[dir];
                     int pushStandC = cc - pushDc[dir];
                     int pushStandPos = pushStandR * width + pushStandC;
 
-                    // Where the crate will end up after the push
+                    // Filter 1: Check our zero-allocation array to see if we can reach it
+                    if (pushStandPos < 0 || pushStandPos >= (width*height) || reachable[pushStandPos] != bfsToken) continue;
+
                     int newCrateR = cr + pushDr[dir];
                     int newCrateC = cc + pushDc[dir];
                     int newCratePos = newCrateR * width + newCrateC;
 
-                    // --- THE DIGITAL FILTERS ---
-                    
-                    // Filter 1: Can the player physically walk to the pushing position?
-                    if (!reachable.containsKey(pushStandPos)) continue;
-
-                    // Filter 2: Is the destination an illegal tile? (Wall, another crate, or dead corner)
-                    if (mapData[newCrateR][newCrateC] == '#' || 
-                        deadTiles[newCrateR][newCrateC] || 
-                        curr.cratePositions.contains(newCratePos)) {
-                        continue;
+                    // Filter 2: Did we hit a wall or another crate?
+                    if (mapData[newCrateR][newCrateC] == '#' || curr.cratePositions.contains(newCratePos)) {
+                        continue; 
                     }
 
-                    // Generate the temporary crate layout for the deadlock check
                     List<Integer> nextCrates = new ArrayList<>(curr.cratePositions);
-                    nextCrates.remove(Integer.valueOf(cratePos));
+                    nextCrates.remove(Integer.valueOf(cratePos)); 
                     nextCrates.add(newCratePos);
 
-                    // Filter 3: Does this specific push create a 2x2 freeze?
-                    if (isTwoByTwoDeadlock(newCrateR, newCrateC, nextCrates, mapData)) {
+                    // Filter 3: Static Deadlines, 2x2s, and Frozen Deadlocks
+                    if (deadTiles[newCrateR][newCrateC] || 
+                        isTwoByTwoDeadlock(newCrateR, newCrateC, nextCrates, mapData) ||
+                        isFrozenDeadlock(nextCrates, mapData)) {
                         continue;
                     }
 
-                    // --- MACRO-MOVE VALIDATED ---
+                    // --- THE SECRET SAUCE (Momentum & Penalties) ---
+                    String walkPath = movePaths[pushStandPos];
+                    int walkCost = walkPath.length();
                     
-                    // The player steps into the crate's old position after pushing
-                    int nextPlayerR = cr;
-                    int nextPlayerC = cc;
+                    // Penalty if we push a box off a target (Stops undoing progress)
+                    int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[newCratePos]) ? 100 : 0;
+                    
+                    // Penalty if we abandon the box we were just pushing (Stops juggling)
+                    int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 20 : 0;
 
-                    // Combine the walking footsteps with the actual push command
-                    String walkPath = reachable.get(pushStandPos);
+                    // Add everything to the gCost
+                    int newGCost = curr.gCost + walkCost + targetLockPenalty + switchPenalty + 1;
                     String fullPath = curr.path + walkPath + pushChars[dir];
 
-                    // NEW: Pass in curr.pushes + 1
-                    GameState nextState = new GameState(nextPlayerR, nextPlayerC, nextCrates, fullPath, curr.pushes + 1);
-                    String hash = nextState.getHash();
-
-                    // If we haven't seen this exact board state before, queue it!
-                    if (!visited.contains(hash)) {
-                        visited.add(hash);
-                        queue.add(nextState);
-                    }
+                    GameState nextState = new GameState(cr, cc, nextCrates, fullPath, newGCost, newCratePos);
+                    queue.add(nextState);
                 }
             }
         }
@@ -235,10 +227,13 @@ public class SokoBot {
 
     private void initTargets(char[][] mapData) {
         targets = new ArrayList<>();
+        isTargetTile = new boolean[width * height];
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
                 if (mapData[r][c] == '.') {
-                    targets.add(r * width + c);
+                    int pos = r * width + c;
+                    targets.add(pos);
+                    isTargetTile[pos] = true;
                 }
             }
         }
@@ -246,19 +241,71 @@ public class SokoBot {
 
     private void initDeadTiles(char[][] mapData) {
         deadTiles = new boolean[height][width];
+        
+        // Step 1: Find all the standard 90-degree corners
         for (int r = 1; r < height - 1; r++) {
             for (int c = 1; c < width - 1; c++) {
                 if (mapData[r][c] == '#' || mapData[r][c] == '.') continue; 
-
+                
                 boolean wallUp = mapData[r - 1][c] == '#';
                 boolean wallDown = mapData[r + 1][c] == '#';
                 boolean wallLeft = mapData[r][c - 1] == '#';
                 boolean wallRight = mapData[r][c + 1] == '#';
-
-                if ((wallUp || wallDown) && (wallLeft || wallRight)) {
+                
+                if ((wallUp && wallLeft) || (wallUp && wallRight) || 
+                    (wallDown && wallLeft) || (wallDown && wallRight)) {
                     deadTiles[r][c] = true;
                 }
             }
+        }
+        
+        // Step 2: Trace lines between corners to find Edge Deadlocks!
+        for (int r = 1; r < height - 1; r++) {
+            for (int c = 1; c < width - 1; c++) {
+                if (deadTiles[r][c]) {
+                    if (mapData[r - 1][c] == '#' || mapData[r + 1][c] == '#') {
+                        verifyAndMarkLine(r, c, 0, 1, mapData); // Trace horizontally
+                    }
+                    if (mapData[r][c - 1] == '#' || mapData[r][c + 1] == '#') {
+                        verifyAndMarkLine(r, c, 1, 0, mapData); // Trace vertically
+                    }
+                }
+            }
+        }
+    }
+
+    private void verifyAndMarkLine(int startR, int startC, int dRow, int dCol, char[][] mapData) {
+        int r = startR + dRow;
+        int c = startC + dCol;
+        List<int[]> pathCells = new ArrayList<>();
+        
+        while (r >= 0 && r < height && c >= 0 && c < width && mapData[r][c] != '#') {
+            if (isTargetTile[r * width + c]) return; // Use the O(1) array!
+            
+            boolean hasWallSide1 = false;
+            boolean hasWallSide2 = false;
+            
+            int side1R = r - dCol; int side1C = c - dRow;
+            if (side1R >= 0 && side1R < height && side1C >= 0 && side1C < width) {
+                hasWallSide1 = mapData[side1R][side1C] == '#';
+            }
+            int side2R = r + dCol; int side2C = c + dRow;
+            if (side2R >= 0 && side2R < height && side2C >= 0 && side2C < width) {
+                hasWallSide2 = mapData[side2R][side2C] == '#';
+            }
+            
+            if (!hasWallSide1 && !hasWallSide2) return; // Wall gap, not a trap
+            
+            // If we hit another dead corner, the whole line is a trap!
+            if (deadTiles[r][c]) {
+                for (int[] cell : pathCells) {
+                    deadTiles[cell[0]][cell[1]] = true;
+                }
+                return;
+            }
+            pathCells.add(new int[]{r, c});
+            r += dRow;
+            c += dCol;
         }
     }
 
@@ -285,7 +332,7 @@ public class SokoBot {
     }
 
     private boolean isCrateNotOnTarget(int r, int c, List<Integer> crates, char[][] mapData) {
-        return crates.contains(r * width + c) && mapData[r][c] != '.';
+        return crates.contains(r * width + c) && !isTargetTile[r * width + c];
     }
 
     private boolean isWallOrCrate(int r, int c, List<Integer> crates, char[][] mapData) {
@@ -340,45 +387,85 @@ public class SokoBot {
     }
 
     /**
-     * Maps out every reachable floor tile AND the footsteps taken to get there.
+     * Maps the territory using zero-allocation arrays AND returns a normalized Room ID.
      */
-    private HashMap<Integer, String> getReachableTiles(int startPr, int startPc, List<Integer> crates, char[][] mapData) {
-        HashMap<Integer, String> reachable = new HashMap<>();
-        Queue<int[]> queue = new LinkedList<>();
-        Queue<String> pathQueue = new LinkedList<>(); // Tracks the string of footsteps
-
+    private int runZeroAllocationBFS(int startPr, int startPc, List<Integer> crates, char[][] mapData) {
+        bfsToken++; // Increment token instead of clearing a HashMap
         int startPos = startPr * width + startPc;
-        queue.add(new int[]{startPr, startPc});
-        pathQueue.add("");
-        reachable.put(startPos, "");
+        int normalizedPos = startPos; // Start with player's actual position
+
+        Queue<Integer> queue = new LinkedList<>();
+        queue.add(startPos);
+        reachable[startPos] = bfsToken;
+        movePaths[startPos] = "";
 
         int[] dr = {-1, 1, 0, 0};
         int[] dc = {0, 0, -1, 1};
         char[] dirChars = {'u', 'd', 'l', 'r'};
 
         while (!queue.isEmpty()) {
-            int[] curr = queue.poll();
-            String path = pathQueue.poll();
-            int r = curr[0];
-            int c = curr[1];
+            int curr = queue.poll();
+            
+            // STATE NORMALIZATION: Find the lowest coordinate in this room!
+            if (curr < normalizedPos) normalizedPos = curr; 
+
+            int r = curr / width;
+            int c = curr % width;
+            String currentPath = movePaths[curr];
 
             for (int i = 0; i < 4; i++) {
                 int nr = r + dr[i];
                 int nc = c + dc[i];
                 int nPos = nr * width + nc;
 
-                // Ignore walls, out-of-bounds, and crates
                 if (nr < 0 || nr >= height || nc < 0 || nc >= width || mapData[nr][nc] == '#') continue;
                 if (crates.contains(nPos)) continue;
 
-                // If it's a new floor tile, log it and the path to reach it!
-                if (!reachable.containsKey(nPos)) {
-                    reachable.put(nPos, path + dirChars[i]);
-                    queue.add(new int[]{nr, nc});
-                    pathQueue.add(path + dirChars[i]);
+                if (reachable[nPos] != bfsToken) {
+                    reachable[nPos] = bfsToken;
+                    movePaths[nPos] = currentPath + dirChars[i];
+                    queue.add(nPos);
                 }
             }
         }
-        return reachable;
+        return normalizedPos;
+    }
+
+    private boolean isFrozenDeadlock(List<Integer> crates, char[][] mapData) {
+        for (int cratePos : crates) {
+            int r = cratePos / width;
+            int c = cratePos % width;
+            
+            if (isTargetTile[cratePos]) continue; // Safe on a target
+
+            boolean wallUp = mapData[r-1][c] == '#';
+            boolean wallDown = mapData[r+1][c] == '#';
+            boolean wallLeft = mapData[r][c-1] == '#';
+            boolean wallRight = mapData[r][c+1] == '#';
+            
+            boolean boxUp = crates.contains((r-1)*width + c);
+            boolean boxDown = crates.contains((r+1)*width + c);
+            boolean boxLeft = crates.contains(r*width + c - 1);
+            boolean boxRight = crates.contains(r*width + c + 1);
+            
+            // Is it pinned against a wall by another crate and another wall?
+            if (wallLeft) {
+                if (boxUp && mapData[r-1][c-1] == '#') return true; 
+                if (boxDown && mapData[r+1][c-1] == '#') return true; 
+            }
+            if (wallRight) {
+                if (boxUp && mapData[r-1][c+1] == '#') return true;
+                if (boxDown && mapData[r+1][c+1] == '#') return true;
+            }
+            if (wallUp) {
+                if (boxLeft && mapData[r-1][c-1] == '#') return true;
+                if (boxRight && mapData[r-1][c+1] == '#') return true;
+            }
+            if (wallDown) {
+                if (boxLeft && mapData[r+1][c-1] == '#') return true;
+                if (boxRight && mapData[r+1][c+1] == '#') return true;
+            }
+        }
+        return false;
     }
 }
