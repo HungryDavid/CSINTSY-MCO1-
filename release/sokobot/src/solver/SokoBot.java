@@ -43,6 +43,30 @@ public class SokoBot {
             }
         }
 
+
+        // --- PRE-COMPUTATION: DEAD TILE MAP ---
+        boolean[][] deadTiles = new boolean[height][width];
+        
+        for (int r = 1; r < height - 1; r++) {
+            for (int c = 1; c < width - 1; c++) {
+                // If it's a wall or a target, it's not a dead tile
+                if (mapData[r][c] == '#' || mapData[r][c] == '.') {
+                    continue; 
+                }
+
+                boolean wallUp = mapData[r - 1][c] == '#';
+                boolean wallDown = mapData[r + 1][c] == '#';
+                boolean wallLeft = mapData[r][c - 1] == '#';
+                boolean wallRight = mapData[r][c + 1] == '#';
+
+                // A tile is a dead corner if it's trapped in a 90-degree wall angle
+                if ((wallUp || wallDown) && (wallLeft || wallRight)) {
+                    deadTiles[r][c] = true;
+                }
+            }
+        }
+
+
         // Step B: Initialize the Queue and the Visited Memory
         Queue<GameState> queue = new LinkedList<>();
         HashSet<String> visited = new HashSet<>();
@@ -99,8 +123,8 @@ public class SokoBot {
                     int pushC = nextPc + dc[i];
                     int pushPos = pushR * width + pushC;
 
-                    // A crate cannot be pushed into a wall or another crate
-                    if (mapData[pushR][pushC] == '#' || nextCrates.contains(pushPos)) {
+                    // A crate cannot be pushed into a wall, another crate, OR A DEAD TILE
+                    if (mapData[pushR][pushC] == '#' || nextCrates.contains(pushPos) || deadTiles[pushR][pushC]) {
                         validMove = false;
                     } else {
                         // Move the crate in our temporary memory
