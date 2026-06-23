@@ -159,11 +159,11 @@ public class SokoBot {
                     String walkPath = movePaths[pushStandPos];
                     int walkCost = walkPath.length();
                     
-                    // Penalty if we push a box off a target (Stops undoing progress)
-                    int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[newCratePos]) ? 100 : 0;
+                    // SOFT PENALTY: Gently discourage pushing off targets, but allow it if necessary.
+                    int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[newCratePos]) ? 10 : 0;
                     
-                    // Penalty if we abandon the box we were just pushing (Stops juggling)
-                    int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 20 : 0;
+                    // SOFT PENALTY: Gently prefer keeping momentum on the same box, but allow shuffling.
+                    int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 2 : 0;
 
                     // Add everything to the gCost
                     int newGCost = curr.gCost + walkCost + targetLockPenalty + switchPenalty + 1;
