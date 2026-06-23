@@ -16,15 +16,21 @@ public class SokoBot {
     private String[] movePaths;
     private int bfsToken = 0;
 
+    // NEW: Zobrist Hashing Table
+    // [Tile ID][0 for Player, 1 for Crate]
+    private long[][] zobristTable;
+
     class GameState implements Comparable<GameState> {
         int playerR, playerC;
+        int normalizedPlayerPos = -1; // Set dynamically during execution!
         List<Integer> cratePositions;
         String path;
         int h; 
-        int gCost; // Replaces pushes. Tracks total walk cost + pushes + penalties
-        int lastPushedPos; // Tracks the last box pushed for momentum
+        int gCost; 
+        int lastPushedPos; 
+        long crateHash; // THE UPGRADE: Only hashes the crates!
 
-        public GameState(int pr, int pc, List<Integer> crates, String path, int gCost, int lastPushedPos) {
+        public GameState(int pr, int pc, List<Integer> crates, String path, int gCost, int lastPushedPos, long crateHash) {
             this.playerR = pr;
             this.playerC = pc;
             this.cratePositions = new ArrayList<>(crates);
@@ -33,22 +39,35 @@ public class SokoBot {
             this.h = calculateHeuristic(this.cratePositions);
             this.gCost = gCost; 
             this.lastPushedPos = lastPushedPos;
-        }
-
-        public String getHash() {
-            return playerR + "," + playerC + "-" + cratePositions.toString();
+            this.crateHash = crateHash;
         }
 
         @Override
         public int compareTo(GameState other) {
             int thisScore = this.gCost + (5 * this.h); 
             int otherScore = other.gCost + (5 * other.h);
-
-            // Tie-breaker: If scores are equal, prioritize the state physically closer to the goals
             if (thisScore == otherScore) {
                 return Integer.compare(this.h, other.h); 
             }
             return Integer.compare(thisScore, otherScore);
+        }
+
+        @Override
+        public int hashCode() {
+            // Combine the dynamic normalized player with the static crates!
+            long fullHash = crateHash ^ zobristTable[normalizedPlayerPos][0];
+            return (int) (fullHash ^ (fullHash >>> 32));
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (!(obj instanceof GameState)) return false;
+            GameState other = (GameState) obj;
+            // Two states are identical if their crates match AND their normalized room matches
+            return this.crateHash == other.crateHash && 
+                   this.normalizedPlayerPos == other.normalizedPlayerPos && 
+                   this.cratePositions.equals(other.cratePositions);
         }
     }
 
@@ -82,10 +101,19 @@ public class SokoBot {
         }
 
         // 3. UPGRADE: Initialize PriorityQueue for A* Search
-        PriorityQueue<GameState> queue = new PriorityQueue<>();
-        HashSet<String> visited = new HashSet<>();
+        // Initialize Zobrist Table (Put this with your other init functions!)
+        initZobristTable();
 
-        GameState initialState = new GameState(startPr, startPc, startCrates, "", 0, -1);
+        PriorityQueue<GameState> queue = new PriorityQueue<>();
+        HashSet<GameState> visited = new HashSet<>(); // NOW STORES GameStates directly!
+
+        // Generate the starting hash from scratch (CRATES ONLY)
+        long initialCrateHash = 0;
+        for (int crate : startCrates) {
+            initialCrateHash ^= zobristTable[crate][1];
+        }
+
+        GameState initialState = new GameState(startPr, startPc, startCrates, "", 0, -1, initialCrateHash); 
         queue.add(initialState);
 
         int[] dr = {-1, 1, 0, 0};
@@ -105,10 +133,11 @@ public class SokoBot {
             // 1. Map territory AND get the normalized Room ID
             int normalizedPlayerID = runZeroAllocationBFS(curr.playerR, curr.playerC, curr.cratePositions, mapData);
 
-            // 2. STATE NORMALIZATION: Have we seen this exact room+crate combo before?
-            String normalizedHash = normalizedPlayerID + "-" + curr.cratePositions.toString();
-            if (visited.contains(normalizedHash)) continue; // Instantly drop the duplicate!
-            visited.add(normalizedHash); // Mark as seen
+            // 2. Set the normalized ID so the HashSet can do its magic automatically
+            curr.normalizedPlayerPos = normalizedPlayerID;
+            
+            if (visited.contains(curr)) continue; 
+            visited.add(curr);
 
             // Check if we won
             if (curr.h == 0) { 
@@ -208,7 +237,12 @@ public class SokoBot {
                     int newGCost = curr.gCost + walkCost + targetLockPenalty + slidePushes + switchPenalty;
                     String fullPath = curr.path + walkPath + tunnelPath;
 
-                    GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, fullPath, newGCost, slideR * width + slideC);
+                    // Calculate the new crate hash dynamically (Takes 1 nanosecond!)
+                    long newCrateHash = curr.crateHash;
+                    newCrateHash ^= zobristTable[cratePos][1];               // XOR crate out of old spot
+                    newCrateHash ^= zobristTable[slideR * width + slideC][1]; // XOR crate into new spot
+
+                    GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, fullPath, newGCost, slideR * width + slideC, newCrateHash);
                     queue.add(nextState);
                 }
             }
@@ -506,5 +540,14 @@ public class SokoBot {
             }
         }
         return false;
+    }
+
+    private void initZobristTable() {
+        Random rnd = new Random(12345); // Fixed seed for debugging consistency
+        zobristTable = new long[width * height][2];
+        for (int i = 0; i < width * height; i++) {
+            zobristTable[i][0] = rnd.nextLong(); // Random 64-bit number for Player here
+            zobristTable[i][1] = rnd.nextLong(); // Random 64-bit number for Crate here
+        }
     }
 }
