@@ -10,6 +10,7 @@ public class SokoBot {
     private int width, height;
     private List<Integer> targets;
     private boolean[] isTargetTile; // NEW: Instant target lookup
+    private boolean[] isCornerTarget; // NEW: The Parking Sensor
     
     // Zero-Allocation BFS Memory
     private int[] reachable;
@@ -180,6 +181,12 @@ public class SokoBot {
 
             for (int i = 0; i < curr.crates.length; i++) {
                 int cratePos = curr.crates[i];
+                
+                // --- THE PARKING PRUNE ---
+                // If this box is solved and locked in a corner, it becomes a ghost. 
+                // We skip generating any moves for it!
+                if (isCornerTarget[cratePos]) continue; 
+
                 int cr = cratePos / width;
                 int cc = cratePos % width;
 
@@ -279,12 +286,25 @@ public class SokoBot {
     private void initTargets(char[][] mapData) {
         targets = new ArrayList<>();
         isTargetTile = new boolean[width * height];
+        isCornerTarget = new boolean[width * height]; // Initialize Parking Sensor
+        
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
                 if (mapData[r][c] == '.') {
                     int pos = r * width + c;
                     targets.add(pos);
                     isTargetTile[pos] = true;
+
+                    // --- TARGET PARKING (Corner Detection) ---
+                    // If a target is in a hard corner, anything placed on it is permanently parked.
+                    boolean wallU = mapData[r-1][c] == '#';
+                    boolean wallD = mapData[r+1][c] == '#';
+                    boolean wallL = mapData[r][c-1] == '#';
+                    boolean wallR = mapData[r][c+1] == '#';
+                    
+                    if ((wallU && wallL) || (wallU && wallR) || (wallD && wallL) || (wallD && wallR)) {
+                        isCornerTarget[pos] = true;
+                    }
                 }
             }
         }
