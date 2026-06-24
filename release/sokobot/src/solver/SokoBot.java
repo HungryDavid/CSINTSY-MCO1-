@@ -96,9 +96,10 @@ public class SokoBot {
         bfsQueue = new int[mapSize];     // Initialize the primitive queue
 
         // 1. Pre-compute static traps and true distances
-        initTargets(mapData);       // MUST GO FIRST! Creates the isTargetTile array.
-        initDeadTiles(mapData);     // Now it can safely use the array.
+        initTargets(mapData, itemsData);       
+        initDeadTiles(mapData);     
         initTrueDistances(mapData);
+        initZobristTable();
 
         // 2. Find starting positions
         int startPr = 0, startPc = 0;
@@ -115,8 +116,7 @@ public class SokoBot {
         }
 
         // 3. UPGRADE: Initialize PriorityQueue for A* Search
-        // Initialize Zobrist Table (Put this with your other init functions!)
-        initZobristTable();
+
 
         PriorityQueue<GameState> queue = new PriorityQueue<>();
         HashSet<GameState> visited = new HashSet<>(); // NOW STORES GameStates directly!
@@ -294,24 +294,26 @@ public class SokoBot {
 
     // --- HELPER METHODS ---
 
-    private void initTargets(char[][] mapData) {
+    private void initTargets(char[][] mapData, char[][] itemsData) {
         targets = new ArrayList<>();
         isTargetTile = new boolean[width * height];
-        isCornerTarget = new boolean[width * height]; // Initialize Parking Sensor
+        isCornerTarget = new boolean[width * height]; 
         
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
-                if (mapData[r][c] == '.') {
+                char m = mapData[r][c];
+                char i = itemsData[r][c];
+                
+                // Checks both arrays so it never misses a target
+                if (m == '.' || m == '+' || m == '*' || i == '.' || i == '+' || i == '*') {
                     int pos = r * width + c;
                     targets.add(pos);
                     isTargetTile[pos] = true;
 
-                    // --- TARGET PARKING (Corner Detection) ---
-                    // If a target is in a hard corner, anything placed on it is permanently parked.
-                    boolean wallU = mapData[r-1][c] == '#';
-                    boolean wallD = mapData[r+1][c] == '#';
-                    boolean wallL = mapData[r][c-1] == '#';
-                    boolean wallR = mapData[r][c+1] == '#';
+                    boolean wallU = r == 0 || mapData[r-1][c] == '#';
+                    boolean wallD = r == height-1 || mapData[r+1][c] == '#';
+                    boolean wallL = c == 0 || mapData[r][c-1] == '#';
+                    boolean wallR = c == width-1 || mapData[r][c+1] == '#';
                     
                     if ((wallU && wallL) || (wallU && wallR) || (wallD && wallL) || (wallD && wallR)) {
                         isCornerTarget[pos] = true;
