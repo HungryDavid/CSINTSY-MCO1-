@@ -61,7 +61,6 @@ public class SokoBot {
             this.playerR = pr;
             this.playerC = pc;
             this.crates = crates;
-            Arrays.sort(this.crates); // Primitive sort, zero object creation!
             
             // THE UPGRADE: Parent Pointers instead of massive Strings
             this.parent = parent; 
@@ -77,10 +76,19 @@ public class SokoBot {
         public int compareTo(GameState other) {
             int thisScore = this.gCost + (5 * this.h); 
             int otherScore = other.gCost + (5 * other.h);
-            if (thisScore == otherScore) {
-                return Integer.compare(this.h, other.h); 
+            
+            if (thisScore != otherScore) {
+                return Integer.compare(thisScore, otherScore);
             }
-            return Integer.compare(thisScore, otherScore);
+            
+            // TIE-BREAKER 1: Always prefer the state that is further along in the level (higher gCost)
+            if (this.gCost != other.gCost) {
+                return Integer.compare(other.gCost, this.gCost); 
+            }
+            
+            // TIE-BREAKER 2: If everything is equal, forcefully break the tie using the Zobrist hash.
+            // This prevents the Priority Queue from thrashing and creates a laser-focused depth search.
+            return Long.compare(this.crateHash, other.crateHash);
         }
 
         @Override
@@ -97,6 +105,35 @@ public class SokoBot {
             return this.crateHash == other.crateHash && 
                    this.normalizedPlayerPos == other.normalizedPlayerPos && 
                    Arrays.equals(this.crates, other.crates); // Primitive memory comparison!
+        }
+    }
+
+    // --- ZERO-ALLOCATION ZOBRIST HASH SET ---
+    class ZobristHashSet {
+        private static final int CAPACITY = 1 << 22; // ~4.1 million slots (Must be power of 2)
+        private static final int MASK = CAPACITY - 1;
+        private long[] keys;
+
+        public ZobristHashSet() {
+            keys = new long[CAPACITY];
+        }
+
+        // Returns true if successfully added. Returns false if it already exists.
+        public boolean add(long key) {
+            if (key == 0) key = 1; // We use 0 to represent an empty slot
+            
+            // Mix the bits to prevent clustering
+            int idx = (int) ((key ^ (key >>> 16)) & MASK); 
+            
+            while (true) {
+                long current = keys[idx];
+                if (current == key) return false; // State has already been visited
+                if (current == 0) {
+                    keys[idx] = key; // State is new, claim the slot!
+                    return true;
+                }
+                idx = (idx + 1) & MASK; // Collision! Linear probe to the next slot
+            }
         }
     }
 
@@ -144,7 +181,7 @@ public class SokoBot {
         initZobristTable();
 
         PriorityQueue<GameState> queue = new PriorityQueue<>();
-        HashSet<Long> visited = new HashSet<>();
+        ZobristHashSet visited = new ZobristHashSet();
 
         // Generate the starting hash from scratch (CRATES ONLY)
         long initialCrateHash = 0;
@@ -198,12 +235,12 @@ public class SokoBot {
             curr.normalizedPlayerPos = normalizedPlayerID;
             
             long fullStateHash = curr.crateHash ^ zobristTable[curr.normalizedPlayerPos][0];
-
-            if (visited.contains(fullStateHash)) {
+            
+            // If add() returns false, we've been here before. Skip it!
+            if (!visited.add(fullStateHash)) {
                 for (int i = 0; i < curr.crates.length; i++) crateMap[curr.crates[i]] = false;
                 continue; 
             }
-            visited.add(fullStateHash);
 
             if (curr.h == 0) { 
                 StringBuilder winningPath = new StringBuilder();
@@ -284,7 +321,7 @@ public class SokoBot {
                     // Pass curr.crates, cratePos, and finalCratePos to avoid premature array allocation!
                     boolean isDeadlocked = deadTiles[slideR][slideC] || 
                                            isTwoByTwoDeadlock(slideR, slideC, mapData) || 
-                                           isFrozenDeadlock(curr.crates, cratePos, finalCratePos, mapData);
+                                           isFrozenDeadlock(finalCratePos, mapData);
 
                     crateMap[cratePos] = true; 
                     crateMap[finalCratePos] = false;
@@ -570,34 +607,53 @@ public class SokoBot {
         return mapData[r][c] == '#' || crateMap[r * width + c];
     }
 
-    // 4. Frozen Deadlock: Uses crateMap for O(1) neighbor checks!
-    private boolean isFrozenDeadlock(int[] currentCrates, int oldCratePos, int newCratePos, char[][] mapData) {
-        for (int i = 0; i < currentCrates.length; i++) {
-            int cratePos = currentCrates[i];
-            // Substitute the moved crate's position on the fly!
-            if (cratePos == oldCratePos) {
-                cratePos = newCratePos;
-            }
-            
-            if (isTargetTile[cratePos]) continue; 
+    // 1. Core logic to check if ONE specific tile position is frozen deadlocked
+    private boolean checkSingleFrozenDeadlock(int cratePos, char[][] mapData) {
+        if (isTargetTile[cratePos]) return false;
 
-            int r = cratePos / width;
-            int c = cratePos % width;
-            
-            boolean wallUp = (r == 0) || mapData[r-1][c] == '#';
-            boolean wallDown = (r == height-1) || mapData[r+1][c] == '#';
-            boolean wallLeft = (c == 0) || mapData[r][c-1] == '#';
-            boolean wallRight = (c == width-1) || mapData[r][c+1] == '#';
-            
-            boolean boxUp = (r > 0) && crateMap[(r-1)*width + c];
-            boolean boxDown = (r < height-1) && crateMap[(r+1)*width + c];
-            boolean boxLeft = (c > 0) && crateMap[r*width + c - 1];
-            boolean boxRight = (c < width-1) && crateMap[r*width + c + 1];
-            
-            if (wallLeft && ((boxUp && mapData[r-1][c-1] == '#') || (boxDown && mapData[r+1][c-1] == '#'))) return true;
-            if (wallRight && ((boxUp && mapData[r-1][c+1] == '#') || (boxDown && mapData[r+1][c+1] == '#'))) return true;
-            if (wallUp && ((boxLeft && mapData[r-1][c-1] == '#') || (boxRight && mapData[r-1][c+1] == '#'))) return true;
-            if (wallDown && ((boxLeft && mapData[r+1][c-1] == '#') || (boxRight && mapData[r+1][c+1] == '#'))) return true;
+        int r = cratePos / width;
+        int c = cratePos % width;
+        
+        boolean wallUp = (r == 0) || mapData[r-1][c] == '#';
+        boolean wallDown = (r == height-1) || mapData[r+1][c] == '#';
+        boolean wallLeft = (c == 0) || mapData[r][c-1] == '#';
+        boolean wallRight = (c == width-1) || mapData[r][c+1] == '#';
+        
+        boolean boxUp = (r > 0) && crateMap[(r-1)*width + c];
+        boolean boxDown = (r < height-1) && crateMap[(r+1)*width + c];
+        boolean boxLeft = (c > 0) && crateMap[r*width + c - 1];
+        boolean boxRight = (c < width-1) && crateMap[r*width + c + 1];
+        
+        if (wallLeft && ((boxUp && mapData[r-1][c-1] == '#') || (boxDown && mapData[r+1][c-1] == '#'))) return true;
+        if (wallRight && ((boxUp && mapData[r-1][c+1] == '#') || (boxDown && mapData[r+1][c+1] == '#'))) return true;
+        if (wallUp && ((boxLeft && mapData[r-1][c-1] == '#') || (boxRight && mapData[r-1][c+1] == '#'))) return true;
+        if (wallDown && ((boxLeft && mapData[r+1][c-1] == '#') || (boxRight && mapData[r+1][c+1] == '#'))) return true;
+        
+        return false;
+    }
+
+    // 2. High-speed O(1) Local Neighborhood Deadlock Checker
+    private boolean isFrozenDeadlock(int newCratePos, char[][] mapData) {
+        if (checkSingleFrozenDeadlock(newCratePos, mapData)) return true;
+        
+        int r = newCratePos / width;
+        int c = newCratePos % width;
+        
+        if (r > 0) {
+            int up = (r - 1) * width + c;
+            if (crateMap[up] && checkSingleFrozenDeadlock(up, mapData)) return true;
+        }
+        if (r < height - 1) {
+            int down = (r + 1) * width + c;
+            if (crateMap[down] && checkSingleFrozenDeadlock(down, mapData)) return true;
+        }
+        if (c > 0) {
+            int left = r * width + (c - 1);
+            if (crateMap[left] && checkSingleFrozenDeadlock(left, mapData)) return true;
+        }
+        if (c < width - 1) {
+            int right = r * width + (c + 1);
+            if (crateMap[right] && checkSingleFrozenDeadlock(right, mapData)) return true;
         }
         return false;
     }
