@@ -40,6 +40,12 @@ public class SokoBot {
     private int[] bfsParentPos;     
     private char[] bfsParentDir;
 
+    // --- THE TRANPOSITION TABLE (Heuristic Cache) ---
+    private static final int CACHE_CAPACITY = 1 << 20; // Roughly 1 million slots
+    private static final int CACHE_MASK = CACHE_CAPACITY - 1;
+    private long[] heuristicCacheKeys;
+    private int[] heuristicCacheValues;
+
     class GameState implements Comparable<GameState> {
         int playerR, playerC;
         int normalizedPlayerPos = -1; 
@@ -61,7 +67,7 @@ public class SokoBot {
             this.parent = parent; 
             this.moveFromParent = moveFromParent; 
             
-            this.h = calculateHeuristic(this.crates);
+            this.h = calculateHeuristic(this.crates, crateHash);
             this.gCost = gCost; 
             this.lastPushedPos = lastPushedPos;
             this.crateHash = crateHash;
@@ -105,7 +111,8 @@ public class SokoBot {
         crateMap = new boolean[mapSize]; // Initialize the instant lookup
         bfsQueue = new int[mapSize];     // Initialize the primitive queue
 
-        
+        heuristicCacheKeys = new long[CACHE_CAPACITY];
+        heuristicCacheValues = new int[CACHE_CAPACITY];
 
         // 1. Pre-compute static traps and true distances
         initTargets(mapData);       // MUST GO FIRST! Creates the isTargetTile array.
@@ -137,7 +144,7 @@ public class SokoBot {
         initZobristTable();
 
         PriorityQueue<GameState> queue = new PriorityQueue<>();
-        HashSet<GameState> visited = new HashSet<>(); // NOW STORES GameStates directly!
+        HashSet<Long> visited = new HashSet<>();
 
         // Generate the starting hash from scratch (CRATES ONLY)
         long initialCrateHash = 0;
@@ -190,11 +197,13 @@ public class SokoBot {
             int normalizedPlayerID = runZeroAllocationBFS(curr.playerR, curr.playerC, mapData); // Notice we don't pass crates anymore!
             curr.normalizedPlayerPos = normalizedPlayerID;
             
-            if (visited.contains(curr)) {
+            long fullStateHash = curr.crateHash ^ zobristTable[curr.normalizedPlayerPos][0];
+
+            if (visited.contains(fullStateHash)) {
                 for (int i = 0; i < curr.crates.length; i++) crateMap[curr.crates[i]] = false;
                 continue; 
             }
-            visited.add(curr);
+            visited.add(fullStateHash);
 
             if (curr.h == 0) { 
                 StringBuilder winningPath = new StringBuilder();
@@ -268,7 +277,21 @@ public class SokoBot {
 
                     int finalCratePos = slideR * width + slideC;
 
-                    // --- DELAYED CONSTRUCTION: Build the primitive array exactly ONCE ---
+                    // --- THE O(1) CRATEMAP TOGGLE ---
+                    crateMap[cratePos] = false; 
+                    crateMap[finalCratePos] = true;
+
+                    // Pass curr.crates, cratePos, and finalCratePos to avoid premature array allocation!
+                    boolean isDeadlocked = deadTiles[slideR][slideC] || 
+                                           isTwoByTwoDeadlock(slideR, slideC, mapData) || 
+                                           isFrozenDeadlock(curr.crates, cratePos, finalCratePos, mapData);
+
+                    crateMap[cratePos] = true; 
+                    crateMap[finalCratePos] = false;
+
+                    if (isDeadlocked) continue; // Safely skip without creating any objects!
+
+                    // --- DELAYED CONSTRUCTION: Now it's safe to build the primitive array ---
                     int[] nextCrates = new int[curr.crates.length];
                     int idx = 0;
                     for (int j = 0; j < curr.crates.length; j++) {
@@ -278,29 +301,11 @@ public class SokoBot {
                     }
                     nextCrates[idx] = finalCratePos;
 
-                    // --- THE O(1) CRATEMAP TOGGLE ---
-                    // Temporarily update the instant-lookup map to test the final position
-                    crateMap[cratePos] = false; 
-                    crateMap[finalCratePos] = true;
-
-                    boolean isDeadlocked = deadTiles[slideR][slideC] || 
-                                           isTwoByTwoDeadlock(slideR, slideC, mapData) || 
-                                           isFrozenDeadlock(nextCrates, mapData);
-
-                    // Revert the map instantly so it's clean for the next loop
-                    crateMap[cratePos] = true; 
-                    crateMap[finalCratePos] = false;
-
-                    if (isDeadlocked) continue;
-
                     int currentPlayerPos = curr.playerR * width + curr.playerC;
-                    String walkPath = reconstructWalkPath(currentPlayerPos, pushStandPos);
                     int walkCost = bfsDist[pushStandPos];
                     
-                    // 2. Generate tunnel string in one pass
-                    char[] tunnelChars = new char[slidePushes];
-                    Arrays.fill(tunnelChars, PUSH_CHARS[dir]);
-                    String tunnelPath = new String(tunnelChars);
+                    // Replaces walkPath, tunnelChars, tunnelPath, and walkPath + tunnelPath!
+                    String totalPath = reconstructCombinedPath(currentPlayerPos, pushStandPos, PUSH_CHARS[dir], slidePushes);
                     
                     int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[finalCratePos]) ? 10 : 0;
                     int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 5 : 0;
@@ -310,7 +315,8 @@ public class SokoBot {
                     newCrateHash ^= zobristTable[cratePos][1];               
                     newCrateHash ^= zobristTable[finalCratePos][1]; 
 
-                    GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, curr, walkPath + tunnelPath, newGCost, finalCratePos, newCrateHash);
+                    // Pass the totalPath directly
+                    GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, curr, totalPath, newGCost, finalCratePos, newCrateHash);
                     queue.add(nextState);
                 }
             }
@@ -486,20 +492,18 @@ public class SokoBot {
         return normalizedPos;
     }
 
-    private String reconstructWalkPath(int startPos, int endPos) {
-        if (startPos == endPos) return "";
-        int len = bfsDist[endPos];
-        char[] path = new char[len];
-        int curr = endPos;
-        for (int i = len - 1; i >= 0; i--) {
-            path[i] = bfsParentDir[curr];
-            curr = bfsParentPos[curr];
-        }
-        return new String(path);
-    }
-
     // 2. Heuristic accepts int[] array instead of List
-    private int calculateHeuristic(int[] crates) {
+    private int calculateHeuristic(int[] crates, long crateHash) {
+        // 1. FAST PATH: Check the Cache
+        // We use bitwise AND to instantly wrap the hash into the array bounds
+        int cacheIdx = (int) (crateHash & CACHE_MASK); 
+        
+        // If the key matches perfectly, we already did the math for this crate layout!
+        if (heuristicCacheKeys[cacheIdx] == crateHash) {
+            return heuristicCacheValues[cacheIdx];
+        }
+
+        // 2. SLOW PATH: Calculate it
         int totalDistance = 0;
         Arrays.fill(targetUsedGlobal, false);
         Arrays.fill(crateUsedGlobal, false);
@@ -531,6 +535,11 @@ public class SokoBot {
                 totalDistance += minDistance;
             }
         }
+
+        // 3. Save the result to the cache for next time
+        heuristicCacheKeys[cacheIdx] = crateHash;
+        heuristicCacheValues[cacheIdx] = totalDistance;
+
         return totalDistance;
     }
 
@@ -562,15 +571,19 @@ public class SokoBot {
     }
 
     // 4. Frozen Deadlock: Uses crateMap for O(1) neighbor checks!
-    private boolean isFrozenDeadlock(int[] nextCrates, char[][] mapData) {
-        for (int i = 0; i < nextCrates.length; i++) {
-            int cratePos = nextCrates[i];
-            int r = cratePos / width;
-            int c = cratePos % width;
+    private boolean isFrozenDeadlock(int[] currentCrates, int oldCratePos, int newCratePos, char[][] mapData) {
+        for (int i = 0; i < currentCrates.length; i++) {
+            int cratePos = currentCrates[i];
+            // Substitute the moved crate's position on the fly!
+            if (cratePos == oldCratePos) {
+                cratePos = newCratePos;
+            }
             
             if (isTargetTile[cratePos]) continue; 
 
-            // FIXED: Safe array bounds checking
+            int r = cratePos / width;
+            int c = cratePos % width;
+            
             boolean wallUp = (r == 0) || mapData[r-1][c] == '#';
             boolean wallDown = (r == height-1) || mapData[r+1][c] == '#';
             boolean wallLeft = (c == 0) || mapData[r][c-1] == '#';
@@ -597,4 +610,21 @@ public class SokoBot {
             zobristTable[i][1] = rnd.nextLong(); // Random 64-bit number for Crate here
         }
     }
+
+    private String reconstructCombinedPath(int startPos, int endPos, char pushChar, int pushCount) {
+        int walkLen = (startPos == endPos) ? 0 : bfsDist[endPos];
+        int totalLen = walkLen + pushCount;
+        char[] path = new char[totalLen];
+        
+        int curr = endPos;
+        for (int i = walkLen - 1; i >= 0; i--) {
+            path[i] = bfsParentDir[curr];
+            curr = bfsParentPos[curr];
+        }
+        for (int i = walkLen; i < totalLen; i++) {
+            path[i] = pushChar;
+        }
+        return new String(path);
+    }
+
 }
