@@ -321,73 +321,60 @@ public class SokoBot {
         }
     }
 
+    // --- THE PULL-BFS PREPROCESSOR (Absolute Deadlock Detection) ---
     private void initDeadTiles(char[][] mapData) {
         deadTiles = new boolean[height][width];
-        
-        // Step 1: Find all the standard 90-degree corners
-        for (int r = 1; r < height - 1; r++) {
-            for (int c = 1; c < width - 1; c++) {
-                if (mapData[r][c] == '#' || mapData[r][c] == '.') continue; 
+        boolean[][] isLive = new boolean[height][width];
+        Queue<int[]> queue = new LinkedList<>();
+
+        // 1. All targets are live starting points
+        for (int t : targets) {
+            int r = t / width;
+            int c = t % width;
+            isLive[r][c] = true;
+            queue.add(new int[]{r, c});
+        }
+
+        // 2. The Ghost Player simulates PULLING boxes backward through the map
+        while (!queue.isEmpty()) {
+            int[] curr = queue.poll();
+            int r = curr[0];
+            int c = curr[1];
+
+            // Try reversing a push from all 4 directions
+            for (int dir = 0; dir < 4; dir++) {
+                // To reverse a push, we subtract the movement vectors.
+                // If a box was pushed DOWN to (r,c), it came from (r-1, c),
+                // and the player was standing at (r-2, c) to push it.
+                int prevBoxR = r - PUSH_DR[dir];
+                int prevBoxC = c - PUSH_DC[dir];
                 
-                boolean wallUp = mapData[r - 1][c] == '#';
-                boolean wallDown = mapData[r + 1][c] == '#';
-                boolean wallLeft = mapData[r][c - 1] == '#';
-                boolean wallRight = mapData[r][c + 1] == '#';
-                
-                if ((wallUp && wallLeft) || (wallUp && wallRight) || 
-                    (wallDown && wallLeft) || (wallDown && wallRight)) {
+                int prevPlayerR = r - 2 * PUSH_DR[dir];
+                int prevPlayerC = c - 2 * PUSH_DC[dir];
+
+                // Bounds check to prevent out-of-bounds errors on map edges
+                if (prevBoxR >= 0 && prevBoxR < height && prevBoxC >= 0 && prevBoxC < width &&
+                    prevPlayerR >= 0 && prevPlayerR < height && prevPlayerC >= 0 && prevPlayerC < width) {
+                    
+                    // If the box's previous spot AND the player's pushing stance are not walls...
+                    if (mapData[prevBoxR][prevBoxC] != '#' && mapData[prevPlayerR][prevPlayerC] != '#') {
+                        // The tile is reachable! Mark it live and add it to the queue.
+                        if (!isLive[prevBoxR][prevBoxC]) {
+                            isLive[prevBoxR][prevBoxC] = true;
+                            queue.add(new int[]{prevBoxR, prevBoxC});
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Any walkable tile that the Ghost Player could not reach is permanently dead
+        for (int r = 0; r < height; r++) {
+            for (int c = 0; c < width; c++) {
+                if (mapData[r][c] != '#' && !isLive[r][c]) {
                     deadTiles[r][c] = true;
                 }
             }
-        }
-        
-        // Step 2: Trace lines between corners to find Edge Deadlocks!
-        for (int r = 1; r < height - 1; r++) {
-            for (int c = 1; c < width - 1; c++) {
-                if (deadTiles[r][c]) {
-                    if (mapData[r - 1][c] == '#' || mapData[r + 1][c] == '#') {
-                        verifyAndMarkLine(r, c, 0, 1, mapData); // Trace horizontally
-                    }
-                    if (mapData[r][c - 1] == '#' || mapData[r][c + 1] == '#') {
-                        verifyAndMarkLine(r, c, 1, 0, mapData); // Trace vertically
-                    }
-                }
-            }
-        }
-    }
-
-    private void verifyAndMarkLine(int startR, int startC, int dRow, int dCol, char[][] mapData) {
-        int r = startR + dRow;
-        int c = startC + dCol;
-        List<int[]> pathCells = new ArrayList<>();
-        
-        while (r >= 0 && r < height && c >= 0 && c < width && mapData[r][c] != '#') {
-            if (isTargetTile[r * width + c]) return; // Use the O(1) array!
-            
-            boolean hasWallSide1 = false;
-            boolean hasWallSide2 = false;
-            
-            int side1R = r - dCol; int side1C = c - dRow;
-            if (side1R >= 0 && side1R < height && side1C >= 0 && side1C < width) {
-                hasWallSide1 = mapData[side1R][side1C] == '#';
-            }
-            int side2R = r + dCol; int side2C = c + dRow;
-            if (side2R >= 0 && side2R < height && side2C >= 0 && side2C < width) {
-                hasWallSide2 = mapData[side2R][side2C] == '#';
-            }
-            
-            if (!hasWallSide1 && !hasWallSide2) return; // Wall gap, not a trap
-            
-            // If we hit another dead corner, the whole line is a trap!
-            if (deadTiles[r][c]) {
-                for (int[] cell : pathCells) {
-                    deadTiles[cell[0]][cell[1]] = true;
-                }
-                return;
-            }
-            pathCells.add(new int[]{r, c});
-            r += dRow;
-            c += dCol;
         }
     }
 
