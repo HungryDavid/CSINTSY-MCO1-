@@ -374,6 +374,7 @@ public class GamePanel extends JPanel implements KeyListener, ActionListener {
   public void actionPerformed(ActionEvent e) {
     if (e.getSource() == animationTimer) {
       if (this.solutionCtr >= this.solutionString.length()) {
+        System.err.println("DEBUG GamePanel: animationTimer finished. solutionLength=" + this.solutionString.length() + ", moves=" + moves + ", progress=" + progress);
         this.animationTimer.stop();
         this.statusString = STATUS_FINISHED_PLAYING_SOLUTION;
         this.repaint();
@@ -401,10 +402,10 @@ public class GamePanel extends JPanel implements KeyListener, ActionListener {
       }
     } else if (e.getSource() == checkForSolutionTimer) {
       if (!solutionThread.isAlive()) {
-        // Solution was found
+        String solution = solutionThread.getSolution();
+        System.err.println("DEBUG GamePanel: checkForSolutionTimer detected thread is dead! solution=\"" + solution + "\"");
         solutionTimer.stop();
         checkForSolutionTimer.stop();
-        String solution = solutionThread.getSolution();
         if (!reportMode)
           this.playSolution(solution);
         else
@@ -415,7 +416,7 @@ public class GamePanel extends JPanel implements KeyListener, ActionListener {
       this.solutionTimeString = String.format("%.2f", elapsedSolutionTime / 1000000000.0) + "s";
       this.repaint();
     } else if (e.getSource() == solutionTimer) {
-      // Solution was not found
+      System.err.println("DEBUG GamePanel: solutionTimer fired (TIMEOUT)!");
       solutionTimer.stop();
       checkForSolutionTimer.stop();
       long elapsedSolutionTime = System.nanoTime() - solutionStartTime;

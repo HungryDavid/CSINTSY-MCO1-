@@ -23,6 +23,7 @@ public class SokoBot {
 
     // NEW: Zobrist Hashing Table
     private long[][] zobristTable;
+    private int statesPolled = 0;
 
     // THE FIX: One array to rule them all. Zero allocations!
     private static final int[] PUSH_DR = {-1, 1, 0, 0};
@@ -58,10 +59,11 @@ public class SokoBot {
 
         @Override
         public int compareTo(GameState other) {
-            int thisScore = this.gCost + (5 * this.h); 
-            int otherScore = other.gCost + (5 * other.h);
+            // Weight reduced from 5 to 2: less greedy, more thorough search
+            int thisScore = this.gCost + (2 * this.h);
+            int otherScore = other.gCost + (2 * other.h);
             if (thisScore == otherScore) {
-                return Integer.compare(this.h, other.h); 
+                return Integer.compare(this.h, other.h);
             }
             return Integer.compare(thisScore, otherScore);
         }
@@ -85,6 +87,36 @@ public class SokoBot {
 
     // --- MAIN EXECUTION LOOP ---
     public String solveSokobanPuzzle(int w, int h, char[][] mapData, char[][] itemsData) {
+        String res = "";
+        Throwable exception = null;
+        try {
+            res = solveSokobanPuzzleInternal(w, h, mapData, itemsData);
+        } catch (Throwable t) {
+            exception = t;
+        }
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("debug_solver.txt");
+            if (exception != null) {
+                fw.write("EXCEPTION: " + exception.toString() + "\n");
+                java.io.PrintWriter pw = new java.io.PrintWriter(fw);
+                exception.printStackTrace(pw);
+            } else {
+                fw.write("SUCCESS\n");
+                fw.write("States Polled: " + this.statesPolled + "\n");
+                fw.write("Solution Length: " + res.length() + "\n");
+                fw.write("Solution: " + res + "\n");
+            }
+            fw.close();
+        } catch (Exception e) {
+            // ignore
+        }
+        if (exception != null) {
+            return "";
+        }
+        return res;
+    }
+
+    private String solveSokobanPuzzleInternal(int w, int h, char[][] mapData, char[][] itemsData) {
         this.width = w;
         this.height = h;
         long startTime = System.currentTimeMillis();
@@ -137,16 +169,18 @@ public class SokoBot {
         GameState initialState = new GameState(startPr, startPc, startCratesArr, null, "", 0, -1, initialCrateHash); 
         queue.add(initialState);
 
+        System.out.println("Initial State: player=(" + startPr + "," + startPc + "), crates=" + Arrays.toString(startCratesArr) + ", h=" + initialState.h);
+
         // NEW: Track the best partial solution for the timeout fallback
         GameState bestState = initialState;
         int minH = initialState.h;
 
         // 4. Execution Search
+        this.statesPolled = 0;
         while (!queue.isEmpty()) {
             // Safety Switch
-            // Safety Switch
             if (System.currentTimeMillis() - startTime > 14000) {
-                System.out.println("Time limit reached! Returning best effort.");
+                System.out.println("Time limit reached! Returning best effort. Polled " + statesPolled + " states.");
                 
                 StringBuilder fallbackPath = new StringBuilder();
                 GameState trace = bestState; // FIXED: Trace from the deepest state!
@@ -158,6 +192,10 @@ public class SokoBot {
             }
 
             GameState curr = queue.poll();
+            statesPolled++;
+            if (statesPolled <= 300) {
+                System.out.println("Polled State #" + statesPolled + ": player=(" + curr.playerR + "," + curr.playerC + "), crates=" + Arrays.toString(curr.crates) + ", g=" + curr.gCost + ", h=" + curr.h + ", qSize=" + queue.size());
+            }
 
             // Update the deepest state tracker
             if (curr.h < minH) {
@@ -289,6 +327,7 @@ public class SokoBot {
             for (int i = 0; i < curr.crates.length; i++) crateMap[curr.crates[i]] = false;
         }
 
+        System.err.println("Search finished. Total states polled: " + statesPolled + ". Queue empty? " + queue.isEmpty());
         return ""; 
     }
 
@@ -376,6 +415,16 @@ public class SokoBot {
                 }
             }
         }
+
+        System.out.println("Dead Tiles Map (X = Dead, . = Live):");
+        for (int r = 0; r < height; r++) {
+            for (int c = 0; c < width; c++) {
+                if (mapData[r][c] == '#') System.out.print("#");
+                else if (deadTiles[r][c]) System.out.print("X");
+                else System.out.print(".");
+            }
+            System.out.println();
+        }
     }
 
     /**
@@ -457,40 +506,66 @@ public class SokoBot {
         return normalizedPos;
     }
 
-    // 2. Heuristic accepts int[] array instead of List
+    // 2. Heuristic: optimal minimum-cost assignment (permutation enumeration for n<=8,
+    //    greedy fallback for larger n). This gives a tighter lower bound than greedy,
+    //    so A* explores fewer wrong states.
     private int calculateHeuristic(int[] crates) {
-        int totalDistance = 0;
-        boolean[] targetUsed = new boolean[targets.size()];
-        boolean[] crateUsed = new boolean[crates.length];
+        int n = crates.length;
+        int m = targets.size();
+        int[][] dist = new int[n][m];
+        for (int i = 0; i < n; i++) {
+            int cr = crates[i] / width;
+            int cc = crates[i] % width;
+            for (int j = 0; j < m; j++) {
+                dist[i][j] = trueDistances[j][cr][cc];
+            }
+        }
+        if (n <= 8) {
+            return optimalAssignment(dist, n, m, new boolean[m], 0);
+        }
+        return greedyAssignment(dist, n, m);
+    }
 
-        for (int step = 0; step < crates.length; step++) {
-            int minDistance = 999999;
-            int bestCrateIndex = -1;
-            int bestTargetIndex = -1;
+    /** Recursively tries all permutations of target assignments and returns the minimum total cost. */
+    private int optimalAssignment(int[][] dist, int n, int m, boolean[] used, int idx) {
+        if (idx == n) return 0;
+        int best = Integer.MAX_VALUE / 2;
+        for (int t = 0; t < m; t++) {
+            if (!used[t]) {
+                used[t] = true;
+                int cost = dist[idx][t] + optimalAssignment(dist, n, m, used, idx + 1);
+                if (cost < best) best = cost;
+                used[t] = false;
+            }
+        }
+        return best;
+    }
 
-            for (int c = 0; c < crates.length; c++) {
+    /** Original greedy matching, used as fallback for large n. */
+    private int greedyAssignment(int[][] dist, int n, int m) {
+        boolean[] targetUsed = new boolean[m];
+        boolean[] crateUsed = new boolean[n];
+        int total = 0;
+        for (int step = 0; step < n; step++) {
+            int minDist = 999999;
+            int bestC = -1, bestT = -1;
+            for (int c = 0; c < n; c++) {
                 if (crateUsed[c]) continue;
-                int cr = crates[c] / width;
-                int cc = crates[c] % width;
-
-                for (int t = 0; t < targets.size(); t++) {
-                    if (targetUsed[t]) continue;
-                    
-                    int dist = trueDistances[t][cr][cc];
-                    if (dist < minDistance) {
-                        minDistance = dist;
-                        bestCrateIndex = c;
-                        bestTargetIndex = t;
+                for (int t = 0; t < m; t++) {
+                    if (!targetUsed[t] && dist[c][t] < minDist) {
+                        minDist = dist[c][t];
+                        bestC = c;
+                        bestT = t;
                     }
                 }
             }
-            if (bestCrateIndex != -1 && bestTargetIndex != -1) {
-                crateUsed[bestCrateIndex] = true;
-                targetUsed[bestTargetIndex] = true;
-                totalDistance += minDistance;
+            if (bestC != -1) {
+                crateUsed[bestC] = true;
+                targetUsed[bestT] = true;
+                total += minDist;
             }
         }
-        return totalDistance;
+        return total;
     }
 
     // 3. O(1) Deadlock: No lists passed! It queries the crateMap directly.
@@ -521,31 +596,43 @@ public class SokoBot {
         return mapData[r][c] == '#' || crateMap[r * width + c];
     }
 
-    // 4. Frozen Deadlock: Uses crateMap for O(1) neighbor checks!
     private boolean isFrozenDeadlock(int[] nextCrates, char[][] mapData) {
-        for (int i = 0; i < nextCrates.length; i++) {
-            int cratePos = nextCrates[i];
-            int r = cratePos / width;
-            int c = cratePos % width;
-            
-            if (isTargetTile[cratePos]) continue; 
+        int mapSize = width * height;
+        boolean[] frozen = new boolean[mapSize];
 
-            // FIXED: Safe array bounds checking
-            boolean wallUp = (r == 0) || mapData[r-1][c] == '#';
-            boolean wallDown = (r == height-1) || mapData[r+1][c] == '#';
-            boolean wallLeft = (c == 0) || mapData[r][c-1] == '#';
-            boolean wallRight = (c == width-1) || mapData[r][c+1] == '#';
-            
-            boolean boxUp = (r > 0) && crateMap[(r-1)*width + c];
-            boolean boxDown = (r < height-1) && crateMap[(r+1)*width + c];
-            boolean boxLeft = (c > 0) && crateMap[r*width + c - 1];
-            boolean boxRight = (c < width-1) && crateMap[r*width + c + 1];
-            
-            if (wallLeft && ((boxUp && mapData[r-1][c-1] == '#') || (boxDown && mapData[r+1][c-1] == '#'))) return true;
-            if (wallRight && ((boxUp && mapData[r-1][c+1] == '#') || (boxDown && mapData[r+1][c+1] == '#'))) return true;
-            if (wallUp && ((boxLeft && mapData[r-1][c-1] == '#') || (boxRight && mapData[r-1][c+1] == '#'))) return true;
-            if (wallDown && ((boxLeft && mapData[r+1][c-1] == '#') || (boxRight && mapData[r+1][c+1] == '#'))) return true;
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (int pos : nextCrates) {
+                if (frozen[pos]) continue;
+
+                int r = pos / width;
+                int c = pos % width;
+
+                // Horizontal check: blocked if left is wall/frozen OR right is wall/frozen
+                boolean leftBlocked = (c == 0) || mapData[r][c-1] == '#' || frozen[r*width + c - 1];
+                boolean rightBlocked = (c == width - 1) || mapData[r][c+1] == '#' || frozen[r*width + c + 1];
+                boolean horizBlocked = leftBlocked || rightBlocked;
+
+                // Vertical check: blocked if top is wall/frozen OR bottom is wall/frozen
+                boolean topBlocked = (r == 0) || mapData[r-1][c] == '#' || frozen[(r-1)*width + c];
+                boolean bottomBlocked = (r == height - 1) || mapData[r+1][c] == '#' || frozen[(r+1)*width + c];
+                boolean vertBlocked = topBlocked || bottomBlocked;
+
+                if (horizBlocked && vertBlocked) {
+                    frozen[pos] = true;
+                    changed = true;
+                }
+            }
         }
+
+        // If any of the frozen crates is not on a target tile, then it is a deadlock!
+        for (int pos : nextCrates) {
+            if (frozen[pos] && !isTargetTile[pos]) {
+                return true;
+            }
+        }
+
         return false;
     }
 
