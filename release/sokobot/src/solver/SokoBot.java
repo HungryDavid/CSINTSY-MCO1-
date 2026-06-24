@@ -31,9 +31,6 @@ public class SokoBot {
     // Global reusable arrays for Heuristic 
     private boolean[] targetUsedGlobal;
     private boolean[] crateUsedGlobal;
-
-    // Static constant to eliminate allocations inside deadlock checks
-    private static final int[][] QUADRANTS = {{-1, -1}, {-1, 0}, {0, -1}, {0, 0}};
     
     // TRULY Zero-Allocation BFS Memory (Replaces movePaths)
     private int[] bfsDist;          
@@ -48,7 +45,6 @@ public class SokoBot {
 
     class GameState implements Comparable<GameState> {
         int playerR, playerC;
-        int normalizedPlayerPos = -1; 
         int[] crates; // THE ARCHITECTURAL UPGRADE: Pure primitives!
         GameState parent; // A reference to the state that created this one
         String moveFromParent; // Only the 2-5 characters it took to get here
@@ -61,7 +57,6 @@ public class SokoBot {
             this.playerR = pr;
             this.playerC = pc;
             this.crates = crates;
-            Arrays.sort(this.crates); // Primitive sort, zero object creation!
             
             // THE UPGRADE: Parent Pointers instead of massive Strings
             this.parent = parent; 
@@ -90,22 +85,6 @@ public class SokoBot {
             // TIE-BREAKER 2: If everything is equal, forcefully break the tie using the Zobrist hash.
             // This prevents the Priority Queue from thrashing and creates a laser-focused depth search.
             return Long.compare(this.crateHash, other.crateHash);
-        }
-
-        @Override
-        public int hashCode() {
-            long fullHash = crateHash ^ zobristTable[normalizedPlayerPos][0];
-            return (int) (fullHash ^ (fullHash >>> 32));
-        }
-
-        @Override
-        public boolean equals(Object obj) {
-            if (this == obj) return true;
-            if (!(obj instanceof GameState)) return false;
-            GameState other = (GameState) obj;
-            return this.crateHash == other.crateHash && 
-                   this.normalizedPlayerPos == other.normalizedPlayerPos && 
-                   Arrays.equals(this.crates, other.crates); // Primitive memory comparison!
         }
     }
 
@@ -232,10 +211,8 @@ public class SokoBot {
                 crateMap[curr.crates[i]] = true;
             }
 
-            int normalizedPlayerID = runZeroAllocationBFS(curr.playerR, curr.playerC, mapData); // Notice we don't pass crates anymore!
-            curr.normalizedPlayerPos = normalizedPlayerID;
-            
-            long fullStateHash = curr.crateHash ^ zobristTable[curr.normalizedPlayerPos][0];
+            int normalizedPlayerID = runZeroAllocationBFS(curr.playerR, curr.playerC, mapData);
+            long fullStateHash = curr.crateHash ^ zobristTable[normalizedPlayerID][0];
             
             // If add() returns false, we've been here before. Skip it!
             if (!visited.add(fullStateHash)) {
@@ -583,18 +560,25 @@ public class SokoBot {
 
     // 3. O(1) Deadlock: No lists passed! It queries the crateMap directly.
     private boolean isTwoByTwoDeadlock(int crateR, int crateC, char[][] mapData) {
-        for (int[] quad : QUADRANTS) { // Uses the static constant now!
-            int r = crateR + quad[0];
-            int c = crateC + quad[1];
-
-            if (isWallOrCrate(r, c, mapData) && isWallOrCrate(r + 1, c, mapData) &&
-                isWallOrCrate(r, c + 1, mapData) && isWallOrCrate(r + 1, c + 1, mapData)) {
-                
-                if (isCrateNotOnTarget(r, c) || isCrateNotOnTarget(r + 1, c) ||
-                    isCrateNotOnTarget(r, c + 1) || isCrateNotOnTarget(r + 1, c + 1)) {
-                    return true; 
-                }
-            }
+        // Top-Left
+        int r = crateR - 1; int c = crateC - 1;
+        if (isWallOrCrate(r, c, mapData) && isWallOrCrate(r + 1, c, mapData) && isWallOrCrate(r, c + 1, mapData) && isWallOrCrate(r + 1, c + 1, mapData)) {
+            if (isCrateNotOnTarget(r, c) || isCrateNotOnTarget(r + 1, c) || isCrateNotOnTarget(r, c + 1) || isCrateNotOnTarget(r + 1, c + 1)) return true;
+        }
+        // Top-Right
+        r = crateR - 1; c = crateC;
+        if (isWallOrCrate(r, c, mapData) && isWallOrCrate(r + 1, c, mapData) && isWallOrCrate(r, c + 1, mapData) && isWallOrCrate(r + 1, c + 1, mapData)) {
+            if (isCrateNotOnTarget(r, c) || isCrateNotOnTarget(r + 1, c) || isCrateNotOnTarget(r, c + 1) || isCrateNotOnTarget(r + 1, c + 1)) return true;
+        }
+        // Bottom-Left
+        r = crateR; c = crateC - 1;
+        if (isWallOrCrate(r, c, mapData) && isWallOrCrate(r + 1, c, mapData) && isWallOrCrate(r, c + 1, mapData) && isWallOrCrate(r + 1, c + 1, mapData)) {
+            if (isCrateNotOnTarget(r, c) || isCrateNotOnTarget(r + 1, c) || isCrateNotOnTarget(r, c + 1) || isCrateNotOnTarget(r + 1, c + 1)) return true;
+        }
+        // Bottom-Right
+        r = crateR; c = crateC;
+        if (isWallOrCrate(r, c, mapData) && isWallOrCrate(r + 1, c, mapData) && isWallOrCrate(r, c + 1, mapData) && isWallOrCrate(r + 1, c + 1, mapData)) {
+            if (isCrateNotOnTarget(r, c) || isCrateNotOnTarget(r + 1, c) || isCrateNotOnTarget(r, c + 1) || isCrateNotOnTarget(r + 1, c + 1)) return true;
         }
         return false;
     }
