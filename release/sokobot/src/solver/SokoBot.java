@@ -61,6 +61,7 @@ public class SokoBot {
             this.playerR = pr;
             this.playerC = pc;
             this.crates = crates;
+            Arrays.sort(this.crates); // Primitive sort, zero object creation!
             
             // THE UPGRADE: Parent Pointers instead of massive Strings
             this.parent = parent; 
