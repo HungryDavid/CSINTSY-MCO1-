@@ -219,7 +219,7 @@ public class SokoBot {
                     int slidePushes = 1;
                     String tunnelPath = "" + PUSH_CHARS[dir];
 
-                    // --- THE PRIMITIVE HIGHWAY SYSTEM (Zero Objects Created Here!) ---
+                    // --- THE PRIMITIVE HIGHWAY SYSTEM (Zero Objects Created Here!) --- "THIS SOLVE ORIGINAL 2 AND ORIGINAL 3"
                     while (true) {
                         boolean isHorizTunnel = mapData[slideR - 1][slideC] == '#' && mapData[slideR + 1][slideC] == '#';
                         boolean isVertTunnel = mapData[slideR][slideC - 1] == '#' && mapData[slideR][slideC + 1] == '#';
@@ -233,6 +233,14 @@ public class SokoBot {
                         int nextPos = nextSlideR * width + nextSlideC;
 
                         if (mapData[nextSlideR][nextSlideC] == '#' || (crateMap[nextPos] && nextPos != cratePos) || deadTiles[nextSlideR][nextSlideC]) break;
+
+                        // NEW FIX: Intersection Look-ahead Prune!
+                        // Check if the next tile breaks the tunnel. If so, stop HERE before entering the intersection.
+                        boolean nextHorizTunnel = mapData[nextSlideR - 1][nextSlideC] == '#' && mapData[nextSlideR + 1][nextSlideC] == '#';
+                        boolean nextVertTunnel = mapData[nextSlideR][nextSlideC - 1] == '#' && mapData[nextSlideR][nextSlideC + 1] == '#';
+                        
+                        if ((dir == 0 || dir == 1) && !nextVertTunnel) break;
+                        if ((dir == 2 || dir == 3) && !nextHorizTunnel) break;
 
                         playerWalkR = slideR;
                         playerWalkC = slideC;
