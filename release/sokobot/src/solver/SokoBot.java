@@ -96,7 +96,7 @@ public class SokoBot {
         bfsQueue = new int[mapSize];     // Initialize the primitive queue
 
         // 1. Pre-compute static traps and true distances
-        initTargets(mapData, itemsData);       // Pass both arrays!
+        initTargets(mapData);       // MUST GO FIRST! Creates the isTargetTile array.
         initDeadTiles(mapData);     // Now it can safely use the array.
         initTrueDistances(mapData);
 
@@ -105,26 +105,14 @@ public class SokoBot {
         List<Integer> startCrates = new ArrayList<>();
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
-                char mChar = mapData[r][c];
-                char iChar = itemsData[r][c];
-                
-                if (mChar == '@' || iChar == '@' || mChar == '+' || iChar == '+') {
+                if (itemsData[r][c] == '@') {
                     startPr = r;
                     startPc = c;
-                } 
-                if (mChar == '$' || iChar == '$' || mChar == '*' || iChar == '*') {
+                } else if (itemsData[r][c] == '$') {
                     startCrates.add(r * width + c);
                 }
             }
         }
-        // Diagnostic to ensure we aren't starting with zero boxes
-        if (startCrates.isEmpty()) {
-            System.err.println("CRITICAL: No crates detected on map!");
-        }
-        
-        // --- OPTIONAL DEBUGGING PRINT ---
-        // Uncomment this to verify the board is loading correctly:
-        // System.out.println("Loaded " + startCrates.size() + " crates and " + targets.size() + " targets.");
 
         // 3. UPGRADE: Initialize PriorityQueue for A* Search
         // Initialize Zobrist Table (Put this with your other init functions!)
@@ -152,7 +140,6 @@ public class SokoBot {
         // NEW: Track the best partial solution for the timeout fallback
         GameState bestState = initialState;
         int minH = initialState.h;
-
 
         // 4. Execution Search
         while (!queue.isEmpty()) {
@@ -268,52 +255,53 @@ public class SokoBot {
                     nextCrates[idx] = finalCratePos;
 
                     // --- THE O(1) CRATEMAP TOGGLE ---
+                    // Temporarily update the instant-lookup map to test the final position
                     crateMap[cratePos] = false; 
                     crateMap[finalCratePos] = true;
 
-                    // Verify state before deadlock check
                     boolean isDeadlocked = deadTiles[slideR][slideC] || 
-                                        isTwoByTwoDeadlock(slideR, slideC, mapData) || 
-                                        isFrozenDeadlock(nextCrates, mapData);
+                                           isTwoByTwoDeadlock(slideR, slideC, mapData) || 
+                                           isFrozenDeadlock(nextCrates, mapData);
 
-                    // If the box is NOT deadlocked, only then proceed
-                    if (!isDeadlocked) {
-                        String walkPath = movePaths[pushStandPos];
-                        int walkCost = walkPath.length();
-                        int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[finalCratePos]) ? 10 : 0;
-                        int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 5 : 0;
-                        int newGCost = curr.gCost + walkCost + targetLockPenalty + slidePushes + switchPenalty;
-                        
-                        long newCrateHash = curr.crateHash ^ zobristTable[cratePos][1] ^ zobristTable[finalCratePos][1]; 
-
-                        GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, curr, walkPath + tunnelPath, newGCost, finalCratePos, newCrateHash);
-                        queue.add(nextState);
-                    }
-
-                    // ALWAYS revert the map
+                    // Revert the map instantly so it's clean for the next loop
                     crateMap[cratePos] = true; 
                     crateMap[finalCratePos] = false;
+
+                    if (isDeadlocked) continue;
+
+                    String walkPath = movePaths[pushStandPos];
+                    int walkCost = walkPath.length();
+                    
+                    // REVERT: Bring back the Focus Mechanics!
+                    int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[finalCratePos]) ? 10 : 0;
+                    int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 5 : 0;
+                    int newGCost = curr.gCost + walkCost + targetLockPenalty + slidePushes + switchPenalty;
+                    
+                    long newCrateHash = curr.crateHash;
+                    newCrateHash ^= zobristTable[cratePos][1];               
+                    newCrateHash ^= zobristTable[finalCratePos][1]; 
+
+                    GameState nextState = new GameState(playerWalkR, playerWalkC, nextCrates, curr, walkPath + tunnelPath, newGCost, finalCratePos, newCrateHash);
+                    queue.add(nextState);
                 }
             }
 
             for (int i = 0; i < curr.crates.length; i++) crateMap[curr.crates[i]] = false;
         }
 
-        return "FAILED_NO_SOLUTION";
+        return ""; 
     }
 
     // --- HELPER METHODS ---
 
-    // Add char[][] itemsData to the parentheses here
-    private void initTargets(char[][] mapData, char[][] itemsData) {
+    private void initTargets(char[][] mapData) {
         targets = new ArrayList<>();
         isTargetTile = new boolean[width * height];
-        isCornerTarget = new boolean[width * height]; 
+        isCornerTarget = new boolean[width * height]; // Initialize Parking Sensor
         
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
-                // Now it can check both arrays without throwing an error
-                if (mapData[r][c] == '.' || itemsData[r][c] == '.') {
+                if (mapData[r][c] == '.') {
                     int pos = r * width + c;
                     targets.add(pos);
                     isTargetTile[pos] = true;
