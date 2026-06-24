@@ -9,21 +9,22 @@ public class SokoBot {
     private int[][][] trueDistances;
     private int width, height;
     private List<Integer> targets;
-    private boolean[] isTargetTile; 
-    private boolean[] isCornerTarget; 
+    private boolean[] isTargetTile; // NEW: Instant target lookup
+    private boolean[] isCornerTarget; // NEW: The Parking Sensor
     
     // Zero-Allocation BFS Memory
     private int[] reachable;
     private String[] movePaths;
     private int bfsToken = 0;
-    private int[] bfsQueue; 
+    private int[] bfsQueue; // Kane's primitive queue
 
-    // O(1) Instant Lookup Map
+    // Kane's O(1) Instant Lookup Map
     private boolean[] crateMap; 
 
-    // Zobrist Hashing Table
+    // NEW: Zobrist Hashing Table
     private long[][] zobristTable;
 
+    // THE FIX: One array to rule them all. Zero allocations!
     private static final int[] PUSH_DR = {-1, 1, 0, 0};
     private static final int[] PUSH_DC = {0, 0, -1, 1};
     private static final char[] PUSH_CHARS = {'u', 'd', 'l', 'r'};
@@ -31,9 +32,9 @@ public class SokoBot {
     class GameState implements Comparable<GameState> {
         int playerR, playerC;
         int normalizedPlayerPos = -1; 
-        int[] crates; 
-        GameState parent; 
-        String moveFromParent; 
+        int[] crates; // THE ARCHITECTURAL UPGRADE: Pure primitives!
+        GameState parent; // A reference to the state that created this one
+        String moveFromParent; // Only the 2-5 characters it took to get here
         int h; 
         int gCost; 
         int lastPushedPos; 
@@ -43,8 +44,9 @@ public class SokoBot {
             this.playerR = pr;
             this.playerC = pc;
             this.crates = crates;
-            Arrays.sort(this.crates); 
+            Arrays.sort(this.crates); // Primitive sort, zero object creation!
             
+            // THE UPGRADE: Parent Pointers instead of massive Strings
             this.parent = parent; 
             this.moveFromParent = moveFromParent; 
             
@@ -77,7 +79,7 @@ public class SokoBot {
             GameState other = (GameState) obj;
             return this.crateHash == other.crateHash && 
                    this.normalizedPlayerPos == other.normalizedPlayerPos && 
-                   Arrays.equals(this.crates, other.crates); 
+                   Arrays.equals(this.crates, other.crates); // Primitive memory comparison!
         }
     }
 
@@ -90,55 +92,64 @@ public class SokoBot {
         int mapSize = width * height;
         reachable = new int[mapSize];
         movePaths = new String[mapSize];
-        crateMap = new boolean[mapSize]; 
-        bfsQueue = new int[mapSize];     
+        crateMap = new boolean[mapSize]; // Initialize the instant lookup
+        bfsQueue = new int[mapSize];     // Initialize the primitive queue
 
-        initTargets(mapData, itemsData);       
-        initDeadTiles(mapData);     
+        // 1. Pre-compute static traps and true distances
+        initTargets(mapData, itemsData);       // Pass both arrays!
+        initDeadTiles(mapData);     // Now it can safely use the array.
         initTrueDistances(mapData);
-        initZobristTable();
 
+        // 2. Find starting positions
         int startPr = 0, startPc = 0;
         List<Integer> startCrates = new ArrayList<>();
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
-                char m = mapData[r][c];
-                char i = (itemsData != null && r < itemsData.length && c < itemsData[r].length) ? itemsData[r][c] : ' ';
-                
-                if (m == '@' || m == '+' || i == '@' || i == '+') { // Checks both layers
+                if (itemsData[r][c] == '@') {
                     startPr = r;
                     startPc = c;
-                } 
-                if (m == '$' || m == '*' || i == '$' || i == '*') { // Checks both layers
+                } else if (itemsData[r][c] == '$') {
                     startCrates.add(r * width + c);
                 }
             }
         }
 
-        PriorityQueue<GameState> queue = new PriorityQueue<>();
-        HashSet<GameState> visited = new HashSet<>(); 
+        // 3. UPGRADE: Initialize PriorityQueue for A* Search
+        // Initialize Zobrist Table (Put this with your other init functions!)
+        initZobristTable();
 
+        PriorityQueue<GameState> queue = new PriorityQueue<>();
+        HashSet<GameState> visited = new HashSet<>(); // NOW STORES GameStates directly!
+
+        // Generate the starting hash from scratch (CRATES ONLY)
         long initialCrateHash = 0;
         for (int crate : startCrates) {
             initialCrateHash ^= zobristTable[crate][1];
         }
 
+        // Convert initial list to primitive array
         int[] startCratesArr = new int[startCrates.size()];
         for (int i = 0; i < startCrates.size(); i++) {
             startCratesArr[i] = startCrates.get(i);
         }
 
+        // Pass 'null' for the parent, and "" for the move!
         GameState initialState = new GameState(startPr, startPc, startCratesArr, null, "", 0, -1, initialCrateHash); 
         queue.add(initialState);
 
+        // NEW: Track the best partial solution for the timeout fallback
         GameState bestState = initialState;
         int minH = initialState.h;
 
+        // 4. Execution Search
         while (!queue.isEmpty()) {
+            // Safety Switch
+            // Safety Switch
             if (System.currentTimeMillis() - startTime > 14000) {
                 System.out.println("Time limit reached! Returning best effort.");
+                
                 StringBuilder fallbackPath = new StringBuilder();
-                GameState trace = bestState; 
+                GameState trace = bestState; // FIXED: Trace from the deepest state!
                 while (trace != null && trace.parent != null) {
                     fallbackPath.insert(0, trace.moveFromParent);
                     trace = trace.parent;
@@ -148,6 +159,7 @@ public class SokoBot {
 
             GameState curr = queue.poll();
 
+            // Update the deepest state tracker
             if (curr.h < minH) {
                 minH = curr.h;
                 bestState = curr;
@@ -157,7 +169,7 @@ public class SokoBot {
                 crateMap[curr.crates[i]] = true;
             }
 
-            int normalizedPlayerID = runZeroAllocationBFS(curr.playerR, curr.playerC, mapData); 
+            int normalizedPlayerID = runZeroAllocationBFS(curr.playerR, curr.playerC, mapData); // Notice we don't pass crates anymore!
             curr.normalizedPlayerPos = normalizedPlayerID;
             
             if (visited.contains(curr)) {
@@ -179,6 +191,9 @@ public class SokoBot {
             for (int i = 0; i < curr.crates.length; i++) {
                 int cratePos = curr.crates[i];
                 
+                // --- THE PARKING PRUNE ---
+                // If this box is solved and locked in a corner, it becomes a ghost. 
+                // We skip generating any moves for it!
                 if (isCornerTarget[cratePos]) continue; 
 
                 int cr = cratePos / width;
@@ -204,12 +219,10 @@ public class SokoBot {
                     int slidePushes = 1;
                     String tunnelPath = "" + PUSH_CHARS[dir];
 
-                    // --- ARMORED HIGHWAY SYSTEM ---
+                    // --- THE PRIMITIVE HIGHWAY SYSTEM (Zero Objects Created Here!) ---
                     while (true) {
-                        boolean isHorizTunnel = (slideR > 0 && mapData[slideR - 1][slideC] == '#') && 
-                                                (slideR < height - 1 && mapData[slideR + 1][slideC] == '#');
-                        boolean isVertTunnel = (slideC > 0 && mapData[slideR][slideC - 1] == '#') && 
-                                               (slideC < width - 1 && mapData[slideR][slideC + 1] == '#');
+                        boolean isHorizTunnel = mapData[slideR - 1][slideC] == '#' && mapData[slideR + 1][slideC] == '#';
+                        boolean isVertTunnel = mapData[slideR][slideC - 1] == '#' && mapData[slideR][slideC + 1] == '#';
                         
                         if (isTargetTile[slideR * width + slideC]) break;
                         if ((dir == 0 || dir == 1) && !isVertTunnel) break; 
@@ -231,6 +244,7 @@ public class SokoBot {
 
                     int finalCratePos = slideR * width + slideC;
 
+                    // --- DELAYED CONSTRUCTION: Build the primitive array exactly ONCE ---
                     int[] nextCrates = new int[curr.crates.length];
                     int idx = 0;
                     for (int j = 0; j < curr.crates.length; j++) {
@@ -240,6 +254,8 @@ public class SokoBot {
                     }
                     nextCrates[idx] = finalCratePos;
 
+                    // --- THE O(1) CRATEMAP TOGGLE ---
+                    // Temporarily update the instant-lookup map to test the final position
                     crateMap[cratePos] = false; 
                     crateMap[finalCratePos] = true;
 
@@ -247,6 +263,7 @@ public class SokoBot {
                                            isTwoByTwoDeadlock(slideR, slideC, mapData) || 
                                            isFrozenDeadlock(nextCrates, mapData);
 
+                    // Revert the map instantly so it's clean for the next loop
                     crateMap[cratePos] = true; 
                     crateMap[finalCratePos] = false;
 
@@ -255,6 +272,7 @@ public class SokoBot {
                     String walkPath = movePaths[pushStandPos];
                     int walkCost = walkPath.length();
                     
+                    // REVERT: Bring back the Focus Mechanics!
                     int targetLockPenalty = (isTargetTile[cratePos] && !isTargetTile[finalCratePos]) ? 10 : 0;
                     int switchPenalty = (curr.lastPushedPos != -1 && curr.lastPushedPos != cratePos) ? 5 : 0;
                     int newGCost = curr.gCost + walkCost + targetLockPenalty + slidePushes + switchPenalty;
@@ -271,11 +289,12 @@ public class SokoBot {
             for (int i = 0; i < curr.crates.length; i++) crateMap[curr.crates[i]] = false;
         }
 
-        return ""; 
+        return "FAILED_NO_SOLUTION";
     }
 
     // --- HELPER METHODS ---
 
+    // Add char[][] itemsData to the parentheses here
     private void initTargets(char[][] mapData, char[][] itemsData) {
         targets = new ArrayList<>();
         isTargetTile = new boolean[width * height];
@@ -283,20 +302,18 @@ public class SokoBot {
         
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
-                char m = mapData[r][c];
-                char i = (itemsData != null && r < itemsData.length && c < itemsData[r].length) ? itemsData[r][c] : ' ';
-                
-                // Now it safely checks BOTH the map background and the dynamic items layer!
-                if (m == '.' || m == '+' || m == '*' || i == '.' || i == '+' || i == '*') {
+                // Now it can check both arrays without throwing an error
+                if (mapData[r][c] == '.' || itemsData[r][c] == '.') {
                     int pos = r * width + c;
                     targets.add(pos);
                     isTargetTile[pos] = true;
 
-                    // --- ARMORED TARGET PARKING ---
-                    boolean wallU = r == 0 || mapData[r-1][c] == '#';
-                    boolean wallD = r == height-1 || mapData[r+1][c] == '#';
-                    boolean wallL = c == 0 || mapData[r][c-1] == '#';
-                    boolean wallR = c == width-1 || mapData[r][c+1] == '#';
+                    // --- TARGET PARKING (Corner Detection) ---
+                    // If a target is in a hard corner, anything placed on it is permanently parked.
+                    boolean wallU = mapData[r-1][c] == '#';
+                    boolean wallD = mapData[r+1][c] == '#';
+                    boolean wallL = mapData[r][c-1] == '#';
+                    boolean wallR = mapData[r][c+1] == '#';
                     
                     if ((wallU && wallL) || (wallU && wallR) || (wallD && wallL) || (wallD && wallR)) {
                         isCornerTarget[pos] = true;
@@ -306,11 +323,13 @@ public class SokoBot {
         }
     }
 
+    // --- THE PULL-BFS PREPROCESSOR (Absolute Deadlock Detection) ---
     private void initDeadTiles(char[][] mapData) {
         deadTiles = new boolean[height][width];
         boolean[][] isLive = new boolean[height][width];
         Queue<int[]> queue = new LinkedList<>();
 
+        // 1. All targets are live starting points
         for (int t : targets) {
             int r = t / width;
             int c = t % width;
@@ -318,22 +337,30 @@ public class SokoBot {
             queue.add(new int[]{r, c});
         }
 
+        // 2. The Ghost Player simulates PULLING boxes backward through the map
         while (!queue.isEmpty()) {
             int[] curr = queue.poll();
             int r = curr[0];
             int c = curr[1];
 
+            // Try reversing a push from all 4 directions
             for (int dir = 0; dir < 4; dir++) {
+                // To reverse a push, we subtract the movement vectors.
+                // If a box was pushed DOWN to (r,c), it came from (r-1, c),
+                // and the player was standing at (r-2, c) to push it.
                 int prevBoxR = r - PUSH_DR[dir];
                 int prevBoxC = c - PUSH_DC[dir];
                 
                 int prevPlayerR = r - 2 * PUSH_DR[dir];
                 int prevPlayerC = c - 2 * PUSH_DC[dir];
 
+                // Bounds check to prevent out-of-bounds errors on map edges
                 if (prevBoxR >= 0 && prevBoxR < height && prevBoxC >= 0 && prevBoxC < width &&
                     prevPlayerR >= 0 && prevPlayerR < height && prevPlayerC >= 0 && prevPlayerC < width) {
                     
+                    // If the box's previous spot AND the player's pushing stance are not walls...
                     if (mapData[prevBoxR][prevBoxC] != '#' && mapData[prevPlayerR][prevPlayerC] != '#') {
+                        // The tile is reachable! Mark it live and add it to the queue.
                         if (!isLive[prevBoxR][prevBoxC]) {
                             isLive[prevBoxR][prevBoxC] = true;
                             queue.add(new int[]{prevBoxR, prevBoxC});
@@ -343,6 +370,7 @@ public class SokoBot {
             }
         }
 
+        // 3. Any walkable tile that the Ghost Player could not reach is permanently dead
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
                 if (mapData[r][c] != '#' && !isLive[r][c]) {
@@ -352,6 +380,9 @@ public class SokoBot {
         }
     }
 
+    /**
+     * Pre-computes the perfect walking distance from every tile to EVERY SPECIFIC target.
+     */
     private void initTrueDistances(char[][] mapData) {
         trueDistances = new int[targets.size()][height][width];
         
@@ -360,6 +391,7 @@ public class SokoBot {
             int tr = target / width;
             int tc = target % width;
 
+            // Fill this specific target's map with high numbers
             for (int r = 0; r < height; r++) {
                 Arrays.fill(trueDistances[t][r], 999999);
             }
@@ -389,6 +421,7 @@ public class SokoBot {
         }
     }
 
+    // 1. BFS no longer needs the crates list! It just uses the global crateMap.
     private int runZeroAllocationBFS(int startPr, int startPc, char[][] mapData) {
         bfsToken++; 
         int startPos = startPr * width + startPc;
@@ -414,7 +447,7 @@ public class SokoBot {
                 int nPos = nr * width + nc;
 
                 if (nr < 0 || nr >= height || nc < 0 || nc >= width || mapData[nr][nc] == '#') continue;
-                if (crateMap[nPos]) continue; 
+                if (crateMap[nPos]) continue; // Instant Lookup!
 
                 if (reachable[nPos] != bfsToken) {
                     reachable[nPos] = bfsToken;
@@ -426,6 +459,7 @@ public class SokoBot {
         return normalizedPos;
     }
 
+    // 2. Heuristic accepts int[] array instead of List
     private int calculateHeuristic(int[] crates) {
         int totalDistance = 0;
         boolean[] targetUsed = new boolean[targets.size()];
@@ -461,7 +495,7 @@ public class SokoBot {
         return totalDistance;
     }
 
-    // --- ARMORED 2x2 DETECTOR ---
+    // 3. O(1) Deadlock: No lists passed! It queries the crateMap directly.
     private boolean isTwoByTwoDeadlock(int crateR, int crateC, char[][] mapData) {
         int[][] quadrants = {{-1, -1}, {-1, 0}, {0, -1}, {0, 0}};
         for (int[] quad : quadrants) {
@@ -481,17 +515,15 @@ public class SokoBot {
     }
 
     private boolean isCrateNotOnTarget(int r, int c) {
-        if (r < 0 || r >= height || c < 0 || c >= width) return false;
         int pos = r * width + c;
         return crateMap[pos] && !isTargetTile[pos];
     }
 
     private boolean isWallOrCrate(int r, int c, char[][] mapData) {
-        if (r < 0 || r >= height || c < 0 || c >= width) return true; // Bounds act as walls!
         return mapData[r][c] == '#' || crateMap[r * width + c];
     }
 
-    // --- ARMORED FROZEN DETECTOR ---
+    // 4. Frozen Deadlock: Uses crateMap for O(1) neighbor checks!
     private boolean isFrozenDeadlock(int[] nextCrates, char[][] mapData) {
         for (int i = 0; i < nextCrates.length; i++) {
             int cratePos = nextCrates[i];
@@ -500,6 +532,7 @@ public class SokoBot {
             
             if (isTargetTile[cratePos]) continue; 
 
+            // FIXED: Safe array bounds checking
             boolean wallUp = (r == 0) || mapData[r-1][c] == '#';
             boolean wallDown = (r == height-1) || mapData[r+1][c] == '#';
             boolean wallLeft = (c == 0) || mapData[r][c-1] == '#';
@@ -510,25 +543,20 @@ public class SokoBot {
             boolean boxLeft = (c > 0) && crateMap[r*width + c - 1];
             boolean boxRight = (c < width-1) && crateMap[r*width + c + 1];
             
-            boolean cornerUL = (r == 0 || c == 0) || mapData[r-1][c-1] == '#';
-            boolean cornerUR = (r == 0 || c == width-1) || mapData[r-1][c+1] == '#';
-            boolean cornerDL = (r == height-1 || c == 0) || mapData[r+1][c-1] == '#';
-            boolean cornerDR = (r == height-1 || c == width-1) || mapData[r+1][c+1] == '#';
-
-            if (wallLeft && ((boxUp && cornerUL) || (boxDown && cornerDL))) return true;
-            if (wallRight && ((boxUp && cornerUR) || (boxDown && cornerDR))) return true;
-            if (wallUp && ((boxLeft && cornerUL) || (boxRight && cornerUR))) return true;
-            if (wallDown && ((boxLeft && cornerDL) || (boxRight && cornerDR))) return true;
+            if (wallLeft && ((boxUp && mapData[r-1][c-1] == '#') || (boxDown && mapData[r+1][c-1] == '#'))) return true;
+            if (wallRight && ((boxUp && mapData[r-1][c+1] == '#') || (boxDown && mapData[r+1][c+1] == '#'))) return true;
+            if (wallUp && ((boxLeft && mapData[r-1][c-1] == '#') || (boxRight && mapData[r-1][c+1] == '#'))) return true;
+            if (wallDown && ((boxLeft && mapData[r+1][c-1] == '#') || (boxRight && mapData[r+1][c+1] == '#'))) return true;
         }
         return false;
     }
 
     private void initZobristTable() {
-        Random rnd = new Random(12345); 
+        Random rnd = new Random(12345); // Fixed seed for debugging consistency
         zobristTable = new long[width * height][2];
         for (int i = 0; i < width * height; i++) {
-            zobristTable[i][0] = rnd.nextLong(); 
-            zobristTable[i][1] = rnd.nextLong(); 
+            zobristTable[i][0] = rnd.nextLong(); // Random 64-bit number for Player here
+            zobristTable[i][1] = rnd.nextLong(); // Random 64-bit number for Crate here
         }
     }
 }
