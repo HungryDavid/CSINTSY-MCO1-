@@ -5,12 +5,13 @@ import java.util.*;
 public class SokoBot {
 
     // --- GLOBAL VARIABLES ---
-    private boolean[][] deadTiles;
-    private int[][][] trueDistances;
+    private boolean[] deadTiles;
+    private int[][] trueDistances;
     private int width, height;
     private List<Integer> targets;
     private boolean[] isTargetTile; // NEW: Instant target lookup
     private boolean[] isCornerTarget; // NEW: The Parking Sensor
+    private int numTargets;
     
     // Zero-Allocation BFS Memory
     private int[] reachable;
@@ -92,7 +93,7 @@ public class SokoBot {
     class ZobristHashSet {
         private static final int CAPACITY = 1 << 22; // ~4.1 million slots (Must be power of 2)
         private static final int MASK = CAPACITY - 1;
-        private long[] keys;
+        private final long[] keys;
 
         public ZobristHashSet() {
             keys = new long[CAPACITY];
@@ -273,7 +274,7 @@ public class SokoBot {
                         int nextSlideC = slideC + PUSH_DC[dir];
                         int nextPos = nextSlideR * width + nextSlideC;
 
-                        if (mapData[nextSlideR][nextSlideC] == '#' || (crateMap[nextPos] && nextPos != cratePos) || deadTiles[nextSlideR][nextSlideC]) break;
+                        if (mapData[nextSlideR][nextSlideC] == '#' || (crateMap[nextPos] && nextPos != cratePos) || deadTiles[nextSlideR * width + nextSlideC]) break;
 
                         // NEW FIX: Intersection Look-ahead Prune!
                         // Check if the next tile breaks the tunnel. If so, stop HERE before entering the intersection.
@@ -297,7 +298,7 @@ public class SokoBot {
                     crateMap[finalCratePos] = true;
 
                     // Pass curr.crates, cratePos, and finalCratePos to avoid premature array allocation!
-                    boolean isDeadlocked = deadTiles[slideR][slideC] || 
+                    boolean isDeadlocked = deadTiles[slideR * width + slideC] || 
                                            isTwoByTwoDeadlock(slideR, slideC, mapData) || 
                                            isFrozenDeadlock(finalCratePos, mapData);
 
@@ -369,11 +370,12 @@ public class SokoBot {
                 }
             }
         }
+        this.numTargets = targets.size();
     }
 
     // --- THE PULL-BFS PREPROCESSOR (Absolute Deadlock Detection) ---
     private void initDeadTiles(char[][] mapData) {
-        deadTiles = new boolean[height][width];
+        deadTiles = new boolean[width * height];
         boolean[][] isLive = new boolean[height][width];
         Queue<int[]> queue = new LinkedList<>();
 
@@ -418,11 +420,12 @@ public class SokoBot {
             }
         }
 
-        // 3. Any walkable tile that the Ghost Player could not reach is permanently dead
+        // REPLACE the bottom block with this:
+        deadTiles = new boolean[width * height];
         for (int r = 0; r < height; r++) {
             for (int c = 0; c < width; c++) {
                 if (mapData[r][c] != '#' && !isLive[r][c]) {
-                    deadTiles[r][c] = true;
+                    deadTiles[r * width + c] = true; // Flattens to 1D math
                 }
             }
         }
@@ -432,35 +435,34 @@ public class SokoBot {
      * Pre-computes the perfect walking distance from every tile to EVERY SPECIFIC target.
      */
     private void initTrueDistances(char[][] mapData) {
-        trueDistances = new int[targets.size()][height][width];
+        trueDistances = new int[numTargets][width * height];
         
-        for (int t = 0; t < targets.size(); t++) {
+        for (int t = 0; t < numTargets; t++) {
             int target = targets.get(t);
             int tr = target / width;
             int tc = target % width;
 
-            // Fill this specific target's map with high numbers
-            for (int r = 0; r < height; r++) {
-                Arrays.fill(trueDistances[t][r], 999999);
-            }
+            // Fill with high numbers
+            Arrays.fill(trueDistances[t], 999999);
 
             Queue<int[]> queue = new LinkedList<>();
-            trueDistances[t][tr][tc] = 0;
+            trueDistances[t][target] = 0; 
             queue.add(new int[]{tr, tc});
 
             while (!queue.isEmpty()) {
                 int[] curr = queue.poll();
                 int r = curr[0];
                 int c = curr[1];
-                int currentDist = trueDistances[t][r][c];
+                int currentDist = trueDistances[t][r * width + c];
 
                 for (int i = 0; i < 4; i++) {
                     int nr = r + PUSH_DR[i];
                     int nc = c + PUSH_DC[i];
+                    int nPos = nr * width + nc;
 
                     if (nr >= 0 && nr < height && nc >= 0 && nc < width && mapData[nr][nc] != '#') {
-                        if (currentDist + 1 < trueDistances[t][nr][nc]) {
-                            trueDistances[t][nr][nc] = currentDist + 1;
+                        if (currentDist + 1 < trueDistances[t][nPos]) {
+                            trueDistances[t][nPos] = currentDist + 1;
                             queue.add(new int[]{nr, nc});
                         }
                     }
@@ -530,13 +532,13 @@ public class SokoBot {
 
             for (int c = 0; c < crates.length; c++) {
                 if (crateUsedGlobal[c]) continue;
-                int cr = crates[c] / width;
-                int cc = crates[c] % width;
+                
+                int cratePos = crates[c]; // NO division or modulo needed!
 
-                for (int t = 0; t < targets.size(); t++) {
+                for (int t = 0; t < numTargets; t++) {
                     if (targetUsedGlobal[t]) continue;
                     
-                    int dist = trueDistances[t][cr][cc];
+                    int dist = trueDistances[t][cratePos]; // Instant 2D memory fetch!
                     if (dist < minDistance) {
                         minDistance = dist;
                         bestCrateIndex = c;
@@ -612,9 +614,7 @@ public class SokoBot {
         if (wallLeft && ((boxUp && mapData[r-1][c-1] == '#') || (boxDown && mapData[r+1][c-1] == '#'))) return true;
         if (wallRight && ((boxUp && mapData[r-1][c+1] == '#') || (boxDown && mapData[r+1][c+1] == '#'))) return true;
         if (wallUp && ((boxLeft && mapData[r-1][c-1] == '#') || (boxRight && mapData[r-1][c+1] == '#'))) return true;
-        if (wallDown && ((boxLeft && mapData[r+1][c-1] == '#') || (boxRight && mapData[r+1][c+1] == '#'))) return true;
-        
-        return false;
+        return wallDown && ((boxLeft && mapData[r+1][c-1] == '#') || (boxRight && mapData[r+1][c+1] == '#'));
     }
 
     // 2. High-speed O(1) Local Neighborhood Deadlock Checker
