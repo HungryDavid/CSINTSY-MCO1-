@@ -174,7 +174,7 @@ public class SokoBot {
             startCratesArr[i] = startCrates.get(i);
         }
 
-        // Pass 'null' for the parent, and "" for the move!
+        // Pass 'null' for the parent, and "" for the move
         GameState initialState = new GameState(startPr, startPc, startCratesArr, null, "", 0, -1, initialCrateHash); 
         queue.add(initialState);
 
@@ -212,7 +212,7 @@ public class SokoBot {
             int normalizedPlayerID = runZeroAllocationBFS(curr.playerR, curr.playerC, mapData);
             long fullStateHash = curr.crateHash ^ zobristTable[normalizedPlayerID][0];
             
-            // If add() returns false, we've been here before. Skip it!
+            // If add() returns false, we've been here before. Skip
             if (!visited.add(fullStateHash)) {
                 for (int i = 0; i < curr.crates.length; i++) crateMap[curr.crates[i]] = false;
                 continue; 
